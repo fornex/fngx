@@ -26,7 +26,7 @@ func lockFile(ctx context.Context, path string) (*fileLock, error) {
 	}
 	delay := 10 * time.Millisecond
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) //nolint:gosec // fd fits in int
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			return &fileLock{f: f}, nil
 		}
@@ -51,6 +51,6 @@ func lockFile(ctx context.Context, path string) (*fileLock, error) {
 // unlock releases the lock. Closing the descriptor releases it as well; the
 // explicit LOCK_UN only makes the intent obvious.
 func (l *fileLock) unlock() error {
-	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN) //nolint:gosec // fd fits in int
+	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	return l.f.Close()
 }
