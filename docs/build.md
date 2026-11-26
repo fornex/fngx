@@ -181,10 +181,12 @@ OWASP CRS) do not see values inside JSON bodies as `ARGS`. The smoke test
 checks this: a JSON body with a matching value must be blocked on every
 other OS, and on EL10 the absence is reported as a note.
 
-Alternatives not taken without a decision: building yajl from an
-unmaintained, unsigned upstream tarball (carries the open CVEs), or from a
-downstream fork or Fedora's patched sources (another source to trust and
-maintain). This is listed under [Open questions](#open-questions).
+**Decision of the customer (26 November 2026):** this limitation is
+accepted. YAJL is not built from source. Rejected alternatives: building
+yajl from an unmaintained, unsigned upstream tarball (carries the open
+CVEs), or from a downstream fork or Fedora's patched sources (another
+source to trust and maintain). To be revisited when ModSecurity replaces
+YAJL (issue #3308).
 
 ### nginx
 
@@ -406,7 +408,12 @@ minutes in total (906 s with 4 jobs, then 799 s with 7 jobs reusing the
 cache). Disk used: about 7 GB. The module is 78–81 MB and needs glibc 2.34
 and the system `libstdc++`.
 
-### Why it is not in `build.sh` yet
+### Why it is not in `build.sh`
+
+**Decision of the customer (26 November 2026):** PageSpeed is not
+integrated for now; `--with-pagespeed` keeps failing with a pointer to this
+section. Reasons recorded at the time:
+
 
 - Only EL9 was tried. We-Amp's recipe has separate legs per distribution;
   EL8, EL10 and Ubuntu 22.04/24.04 (clang 20 or later is required) were not
@@ -415,8 +422,7 @@ and the system `libstdc++`.
   minutes of build on a production server, and needs rebuilding for every
   nginx version.
 - Integrating it means pinning and verifying Bazel and the source tarball in
-  `versions.env` and running the recipe per OS in CI; this is a follow-up
-  if the customer wants PageSpeed (see [Open questions](#open-questions)).
+  `versions.env` and running the recipe per OS in CI.
 
 ## Licenses of downloaded components
 
@@ -441,22 +447,18 @@ zlib, libxml2, YAJL) keep their distribution licenses.
 
 ## Open questions
 
-1. **JSON inspection on EL10.** Accept that ModSecurity does not parse JSON
-   request bodies on AlmaLinux/CloudLinux 10 until ModSecurity replaces
-   YAJL, or build YAJL from a patched source (which one, and who follows its
-   security fixes)?
-2. **CloudLinux.** The build has not run on CloudLinux 8, 9 or 10. It needs
+Decided on 26 November 2026: JSON request bodies are not inspected on EL10
+([YAJL on EL10](#yajl-on-el10)); PageSpeed is not integrated
+([PageSpeed](#pagespeed)).
+
+1. **CloudLinux.** The build has not run on CloudLinux 8, 9 or 10. It needs
    a real server, including the CRB/PowerTools repository ids (assumption
    above).
-3. **Static OpenSSL.** OpenSSL fixes require rebuilding nginx. The plugin
+2. **Static OpenSSL.** OpenSSL fixes require rebuilding nginx. The plugin
    needs a way to tell the administrator when the pinned OpenSSL has a
    security release (not part of this change).
-4. **Upgrade procedure.** The installer has to decide how to swap versions
+3. **Upgrade procedure.** The installer has to decide how to swap versions
    (versioned directory + symlink, restart or `USR2` binary upgrade) given
    the limits listed under "Installation without breaking a running nginx".
-5. **Installed layout** (`/opt/<product>`, `/etc/<product>/nginx`, ...) and
+4. **Installed layout** (`/opt/<product>`, `/etc/<product>/nginx`, ...) and
    the module list are proposals of the developer and await confirmation.
-6. **PageSpeed.** A source build works on AlmaLinux 9 (see
-   [PageSpeed](#pagespeed)). Should it be integrated into `build.sh` for all
-   OSes, given its cost (Bazel, clang, about 7 GB of disk, a long build on
-   the server)?
