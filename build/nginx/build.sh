@@ -17,6 +17,7 @@
 
 set -Eeuo pipefail
 umask 022
+trap 'printf "error: %s failed at line %s (exit %s)\n" "${BASH_COMMAND%% *}" "$LINENO" "$?" >&2' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -35,7 +36,9 @@ Options:
                          A non-default version is verified by PGP only.
   --product NAME         product name used in all paths (default: $PRODUCT)
   --jobs N               parallel make jobs (default: number of CPUs)
-  --workdir DIR          build directory (default: a new directory in /var/tmp)
+  --workdir DIR          parent of the new build directory (default: /var/tmp);
+                         must be owned by root and not writable by others
+                         unless it has the sticky bit
   --keep-workdir         do not delete the build directory on success
   --skip-deps            do not install build dependencies
   --with-pagespeed       also build the PageSpeed module (not supported, see docs)
@@ -102,6 +105,14 @@ CONF_DIR="/etc/$PRODUCT/nginx"
 LOG_DIR="/var/log/$PRODUCT/nginx"
 RUN_DIR="/run/$PRODUCT"
 CACHE_DIR="/var/cache/$PRODUCT/nginx"
+# OpenSSL's compiled-in configuration directory. By default it would point
+# into the build directory, which is deleted after the build and lives in a
+# world-writable parent. nginx built with --with-openssl does not read
+# openssl.cnf unless OPENSSL_CONF is set (NGX_OPENSSL_NO_CONFIG), but the
+# path is fixed anyway. Engines and loadable modules are not built and
+# dynamic loading is disabled (no-dso), so the module and engine paths,
+# which nginx's build keeps under the build directory, are never used.
+OPENSSL_DIR="/etc/$PRODUCT/ssl"
 
 [ "$(id -u)" = 0 ] || die "run as root"
 [ "$(uname -s)" = Linux ] || die "only Linux is supported"
@@ -178,7 +189,7 @@ fetch() {
 	local url="$1" out="$2" attempt rc=0
 	for attempt in 1 2 3 4 5; do
 		rc=0
-		curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 30 \
+		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --connect-timeout 30 \
 			--max-time 900 -o "$out" "$url" || rc=$?
 		[ "$rc" = 0 ] && return 0
 		log "download failed (curl exit $rc, attempt $attempt of 5): $url"
@@ -204,11 +215,11 @@ verify() {
 
 	local gnupghome
 	gnupghome="$(mktemp -d "$WORKDIR/gnupg.XXXXXX")"
-	gpg --homedir "$gnupghome" --batch --quiet --import "$keyfile" 2>/dev/null ||
-		die "cannot import $keyfile"
+	gpg --homedir "$gnupghome" --batch --quiet --import "$keyfile" 2>"$gnupghome/import.err" ||
+		die "cannot import $keyfile: $(cat "$gnupghome/import.err")"
 	status="$(gpg --homedir "$gnupghome" --batch --status-fd 1 \
-		--verify "$file.asc" "$file" 2>/dev/null)" ||
-		die "$name: PGP signature verification failed"
+		--verify "$file.asc" "$file" 2>"$gnupghome/verify.err")" ||
+		die "$name: PGP signature verification failed: $(cat "$gnupghome/verify.err")"
 	rm -rf "$gnupghome"
 
 	# [GNUPG:] VALIDSIG <fpr> <date> <ts> <exp> <ver> <res> <algo> <hash> <class> <primary-fpr>
@@ -231,10 +242,20 @@ get() {
 	fetch "$url.asc" "$file.asc"
 	verify "$file" "$sha" "$fprs" "$keyfile"
 
-	# Refuse archives with absolute paths, '..' or a different top directory.
-	if tar -tzf "$file" | grep -v -E "^$topdir(/|$)" | grep -q .; then
-		die "$name: unexpected paths in archive"
-	fi
+	# Refuse archives with absolute paths, '..' components or entries
+	# outside the expected top directory. The listing is read in full
+	# first: a pipeline that stops early would hide a failure.
+	local list entry
+	list="$(tar -tzf "$file")" || die "$name: cannot list archive"
+	while IFS= read -r entry; do
+		case "$entry" in
+		"$topdir" | "$topdir/" | "$topdir"/*) ;;
+		*) die "$name: entry outside $topdir/: $entry" ;;
+		esac
+		case "/$entry/" in
+		*/../*) die "$name: '..' in archive entry: $entry" ;;
+		esac
+	done <<<"$list"
 	tar -xzf "$file" -C "$SRC" --no-same-owner --no-same-permissions
 	[ -d "$SRC/$topdir" ] || die "$name: $topdir not found after unpacking"
 }
@@ -321,7 +342,7 @@ build_nginx() {
 		--http-scgi-temp-path="$CACHE_DIR/scgi_temp" \
 		"${NGINX_MODULES[@]}" \
 		--with-openssl="$SRC/openssl-$OPENSSL_VERSION" \
-		--with-openssl-opt="no-tests" \
+		--with-openssl-opt="no-tests no-dso no-module no-engine --openssldir=$OPENSSL_DIR" \
 		--add-dynamic-module="$SRC/ModSecurity-nginx-v$MODSECURITY_NGINX_VERSION" \
 		--with-cc-opt="$CC_OPT" \
 		--with-ld-opt="$LD_OPT -Wl,-rpath,$MODSEC_PREFIX/lib"
@@ -331,27 +352,39 @@ build_nginx() {
 	mkdir -p "$STAGE$CACHE_DIR" "$STAGE$LOG_DIR"
 }
 
-# Copy the staged tree over the live system. nginx.conf and other files
-# that an administrator may have changed are not overwritten; nginx's own
-# install step already keeps an existing nginx.conf the same way.
+# Copy the staged tree over the live system.
+#
+# Configuration: files that already exist in $CONF_DIR are never
+# overwritten (an administrator or the plugin may have changed them); only
+# the *.default reference copies are refreshed.
+#
+# Binaries and libraries: each file is copied under a temporary name and
+# renamed over the old one, so a running nginx keeps its open files. The
+# order is libmodsecurity, then the nginx modules and binary. This is not
+# atomic as a whole: a failure in the middle, or an nginx start during the
+# copy, can meet a mix of old and new files (see docs/build.md). A running
+# nginx keeps the old binary until it is restarted or upgraded in place.
 install_stage() {
 	log "installing into $PREFIX and $CONF_DIR"
 	local f rel
-	mkdir -p "$CONF_DIR" "$LOG_DIR" "$RUN_DIR" "$CACHE_DIR"
+	local d
+	for d in "$STAGE$CONF_DIR" "$STAGE$NGINX_PREFIX/sbin" "$STAGE$NGINX_PREFIX/modules" "$STAGE$MODSEC_PREFIX/lib"; do
+		[ -d "$d" ] || die "staging directory missing: $d"
+	done
+	mkdir -p "$CONF_DIR" "$LOG_DIR" "$RUN_DIR" "$CACHE_DIR" "$OPENSSL_DIR"
 	chmod 0750 "$LOG_DIR"
 	while IFS= read -r -d '' f; do
 		rel="${f#"$STAGE"}"
-		if [ -e "$rel" ]; then
+		if [ -e "$rel" ] && [ "${rel%.default}" = "$rel" ]; then
 			continue
 		fi
 		mkdir -p "$(dirname "$rel")"
-		cp -p "$f" "$rel"
+		cp -p "$f" "$rel.new.$$"
+		mv -f -T "$rel.new.$$" "$rel"
 	done < <(find "$STAGE$CONF_DIR" -type f -print0)
 
-	# Binaries and libraries: replace files by rename so a running nginx
-	# keeps its open inodes. cp to a temp name then mv is atomic per file.
 	local dir
-	for dir in "$NGINX_PREFIX" "$MODSEC_PREFIX"; do
+	for dir in "$MODSEC_PREFIX" "$NGINX_PREFIX"; do
 		while IFS= read -r -d '' f; do
 			rel="${f#"$STAGE"}"
 			if [ -d "$f" ] && [ ! -L "$f" ]; then
@@ -363,6 +396,7 @@ install_stage() {
 			fi
 		done < <(find "$STAGE$dir" -mindepth 1 -print0 | sort -z)
 	done
+	log "installed; a running nginx must be restarted (or upgraded with USR2) to use the new binary"
 }
 
 # --- Main -------------------------------------------------------------------
@@ -383,16 +417,21 @@ main() {
 		command -v "$tool" >/dev/null || die "missing build tool: $tool"
 	done
 
-	if [ -z "$WORKDIR" ]; then
-		WORKDIR="$(mktemp -d "/var/tmp/$PRODUCT-nginx-build.XXXXXX")"
-	else
-		mkdir -p "$WORKDIR"
+	# The build always runs in a new directory created by mktemp (mode 0700,
+	# owned by root), so the script never deletes or reuses a directory it
+	# did not create. Its parent must not let other users rename it.
+	local parent="${WORKDIR:-/var/tmp}" owner mode
+	[ -d "$parent" ] || die "--workdir: $parent is not a directory"
+	owner="$(stat -L -c %u "$parent")"
+	mode="$(stat -L -c %a "$parent")"
+	[ "$owner" = 0 ] || die "--workdir: $parent is not owned by root"
+	if [ $((8#$mode & 8#0022)) -ne 0 ] && [ $((8#$mode & 8#1000)) -eq 0 ]; then
+		die "--workdir: $parent is writable by others and has no sticky bit"
 	fi
-	WORKDIR="$(cd "$WORKDIR" && pwd)"
+	WORKDIR="$(mktemp -d "$parent/$PRODUCT-nginx-build.XXXXXX")"
 	DL="$WORKDIR/dl"
 	SRC="$WORKDIR/src"
 	STAGE="$WORKDIR/stage"
-	rm -rf "$DL" "$SRC" "$STAGE"
 	mkdir -p "$DL" "$SRC" "$STAGE"
 	log "work directory: $WORKDIR"
 

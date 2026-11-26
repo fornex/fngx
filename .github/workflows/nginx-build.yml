@@ -42,9 +42,12 @@ jobs:
       - name: Product name matches internal/product
         run: |
           go_name="$(sed -n 's/^const Name = "\(.*\)"$/\1/p' internal/product/product.go)"
-          sh_name="$(sed -n 's/^PRODUCT="\${PRODUCT:-\(.*\)}"$/\1/p' build/nginx/build.sh)"
-          echo "Go: '$go_name', build.sh: '$sh_name'"
-          test -n "$go_name" && test "$go_name" = "$sh_name"
+          test -n "$go_name"
+          for f in build/nginx/build.sh build/nginx/smoke-test.sh; do
+            sh_name="$(sed -n 's/^PRODUCT="\${PRODUCT:-\(.*\)}"$/\1/p' "$f")"
+            echo "Go: '$go_name', $f: '$sh_name'"
+            test "$go_name" = "$sh_name"
+          done
 
   build:
     needs: lint

@@ -52,6 +52,9 @@ cleanup() {
 	if [ -n "$NGINX_PID" ] && kill -0 "$NGINX_PID" 2>/dev/null; then
 		kill -QUIT "$NGINX_PID" 2>/dev/null || true
 		sleep 1
+	elif [ -f "$TMP/run.conf" ]; then
+		"$NGINX" -c "$TMP/run.conf" -s quit 2>/dev/null || true
+		sleep 1
 	fi
 	rm -rf "$TMP"
 }
@@ -88,7 +91,24 @@ if grep -q "running with OpenSSL" <<<"$V"; then
 	fail "nginx runs with a different OpenSSL than it was built with"
 fi
 
-# --- 2. Module and library resolution ---------------------------------------
+# --- 2. Linking and compiled-in paths ---------------------------------------
+
+# OpenSSL is linked statically: nginx must not load a system libssl.
+if ldd "$NGINX" | grep -q -E 'lib(ssl|crypto)\.so'; then
+	fail "nginx links a shared libssl/libcrypto: $(ldd "$NGINX" | grep -E 'lib(ssl|crypto)')"
+else
+	pass "nginx does not link a shared libssl/libcrypto"
+fi
+# OpenSSL's compiled-in configuration directory must not point into the
+# (deleted, world-writable) build directory. ENGINESDIR and MODULESDIR
+# still do, but build.sh disables engines, modules and dynamic loading.
+OSSL_DIRS="$(grep -a -o -E '(OPENSSLDIR|ENGINESDIR|MODULESDIR): "[^"]*"' "$NGINX" | sort -u || true)"
+printf '%s\n' "$OSSL_DIRS"
+if grep -q -x "OPENSSLDIR: \"/etc/$PRODUCT/ssl\"" <<<"$OSSL_DIRS"; then
+	pass "OPENSSLDIR is /etc/$PRODUCT/ssl"
+else
+	fail "OPENSSLDIR is not /etc/$PRODUCT/ssl"
+fi
 
 if [ -f "$MODULE" ]; then
 	pass "module file $MODULE exists"
@@ -99,6 +119,14 @@ if [ -f "$MODULE" ]; then
 		pass "libmodsecurity resolves from $PREFIX/modsecurity/lib"
 	else
 		fail "libmodsecurity does not resolve from $PREFIX/modsecurity/lib"
+	fi
+	# The module's search path must be exactly the product prefix, with no
+	# leftover path from the build directory.
+	RUNPATH="$(readelf -d "$MODULE" | sed -n 's/.*(\(RUNPATH\|RPATH\)).*\[\(.*\)\]/\2/p')"
+	if [ "$RUNPATH" = "$PREFIX/modsecurity/lib" ]; then
+		pass "module RUNPATH is $RUNPATH"
+	else
+		fail "module RUNPATH is '$RUNPATH', want '$PREFIX/modsecurity/lib'"
 	fi
 else
 	fail "module file $MODULE missing"
@@ -201,6 +229,13 @@ if OUT="$("$NGINX" -c "$TMP/run.conf" 2>&1)"; then
 	done
 	NGINX_PID="$(cat "$TMP/run.pid" 2>/dev/null || true)"
 
+	# nginx -t does not bind sockets; check the QUIC listener really is a
+	# UDP socket on port 18443 (0x4813) in the kernel's table.
+	if grep -q -i ':4813 ' /proc/net/udp /proc/net/udp6 2>/dev/null; then
+		pass "nginx listens on UDP port 18443 (QUIC)"
+	else
+		fail "no UDP socket on port 18443"
+	fi
 	code="$(http_code 'http://127.0.0.1:18080/?probe=attack')"
 	if [ "$code" = 200 ]; then
 		pass "ModSecurity is off without 'modsecurity on' (S-3): HTTP $code"
