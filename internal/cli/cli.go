@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package cli implements the command-line interface (U-11).
 package cli
 

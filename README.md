@@ -47,7 +47,8 @@ make build-linux  # build bin/fngx-linux-amd64
 
 ## License
 
-[GNU General Public License v3.0](LICENSE).
+[GNU General Public License v3.0](LICENSE) or (at your option) any
+later version. SPDX identifier: `GPL-3.0-or-later`.
 
 This project is not affiliated with or endorsed by the nginx, cPanel,
 or Cpnginx projects or their owners. Their names are used only to

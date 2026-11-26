@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Command fngx manages nginx on cPanel/WHM servers.
 package main
 
