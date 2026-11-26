@@ -98,6 +98,7 @@ func TestAccepted(t *testing.T) {
 		// "\\" decodes to one backslash; "\c" keeps its backslash, as in nginx.
 		{"backslash kept like nginx", `location ~ "^/a\.b\\c$" { }`, "location ~ ^/a\\.b\\c$ {\n}\n"},
 		{"backslash before quote needs quoting", `location ~ "^/a\\\"$" { }`, "location ~ \"^/a\\\\\\\"$\" {\n}\n"},
+		{"bounded group repetition", `location ~ "^/(a|b)+/(\\d+)/(x[+*]){2}$" { }`, "location ~ \"^/(a|b)+/(\\\\d+)/(x[+*]){2}$\" {\n}\n"},
 		{"lookbehind is not a named capture", `location ~ "(?<=a)b(?<!c)" { }`, "location ~ (?<=a)b(?<!c) {\n}\n"},
 		{"tabs as separators", "return\t204;", "return 204;\n"},
 	}
@@ -222,6 +223,8 @@ func TestRejected(t *testing.T) {
 		{"percent internal", "rewrite ^ /%2e%2e/x last;", 1, 11, "'%'"},
 		{"uri in rewrite query", "rewrite ^ /x?$uri;", 1, 11, "$uri"},
 		{"unknown rewrite flag", "rewrite ^ /x end;", 1, 14, "unknown rewrite flag"},
+		{"header variable in internal query", "rewrite ^ /index.php?$http_x last;", 1, 11, "not allowed in the query"},
+		{"cookie in internal query", "rewrite ^ /index.php?c=$cookie_a;", 1, 11, "not allowed in the query"},
 
 		// Regular expressions.
 		{"named capture location", "location ~ (?<document_root>.*) { }", 1, 12, "named captures"},
@@ -230,6 +233,10 @@ func TestRejected(t *testing.T) {
 		{"pcre verb", `location ~ "(*LIMIT_MATCH=1)a" { }`, 1, 12, "verbs"},
 		{"pcre callout", `location ~ "a(?C1)" { }`, 1, 12, "callouts"},
 		{"empty regex", `location ~ "" { }`, 1, 12, "empty"},
+		{"nested plus", `location ~ "^(a+)+$" { }`, 1, 12, "nested repetition"},
+		{"nested star in rewrite", `rewrite "^/((ab)*c*)*$" /x;`, 1, 9, "nested repetition"},
+		{"nested open range", `location ~ "^(a{2,})+$" { }`, 1, 12, "nested repetition"},
+		{"nested via outer group", `location ~ "^((a+)b)*$" { }`, 1, 12, "nested repetition"},
 
 		// location syntax.
 		{"named location", "location @x { }", 1, 10, "named locations"},
@@ -290,6 +297,10 @@ func TestLimits(t *testing.T) {
 		{"directives", "deny all; deny all; deny all; deny all;", "too many directives"},
 		{"depth", "location /a { location /a/b { location /a/b/c { } } }", "nested too deeply"},
 	}
+	if _, err := mustNew(t, Config{}).Validate([]byte(strings.Repeat("rewrite ^/a /b;\n", maxRegexes+1))); err == nil ||
+		!strings.Contains(err.Error(), "too many regular expressions") {
+		t.Errorf("regex limit: error = %v", err)
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := v.Validate([]byte(tt.in))
@@ -325,6 +336,9 @@ func TestConfig(t *testing.T) {
 		"load_module", "access_log", "error_log", "client_body_temp_path", "disable_symlinks",
 		"ssl_certificate_key", "xslt_stylesheet", "server_name", "listen", "set_real_ip_from",
 		"modsecurity_rules_file", "modsecurity_rules_remote", "stub_status", "resolver", "some_pass",
+		"more_set_headers", "more_set_input_headers", "set_if_empty", "set_unescape_uri", "echo_location",
+		"srcache_fetch", "fancyindex_header", "dav_methods", "create_full_put_path", "upload_store",
+		"pagespeed", "vhost_traffic_status_display",
 	}
 	for _, n := range denied {
 		if _, err := New(Config{ExtraDirectives: []string{n}}); err == nil {

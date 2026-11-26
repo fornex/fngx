@@ -188,6 +188,19 @@ var hardDenyPrefix = []struct{ prefix, reason string }{
 	{"perl", reasonCode},
 	{"js_", reasonCode},
 	{"modsecurity_rules", reasonCode}, // inline rules, rule files and remote rule URLs
+
+	// Common third-party modules. A name-based list cannot know every
+	// module; the administrator remains responsible for what they add.
+	{"more_", reasonVars},          // headers-more: framing headers, request headers to the backend
+	{"set_", reasonVars},           // set-misc and similar: overwrite template variables
+	{"echo", reasonInternal},       // echo_location, echo_subrequest
+	{"srcache_", reasonInternal},   // cache subrequests
+	{"fancyindex", reasonInternal}, // header/footer subrequests and local files
+	{"dav_", reasonFiles},          // PUT/DELETE/MOVE in the document root
+	{"create_full_put_path", reasonFiles},
+	{"upload_", reasonFiles},               // nginx-upload-module stores to a path
+	{"pagespeed", reasonFiles},             // maps URLs to file system paths
+	{"vhost_traffic_status", reasonServer}, // statistics of every server
 }
 
 var hardDenySuffix = []struct{ suffix, reason string }{

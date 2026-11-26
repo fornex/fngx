@@ -42,9 +42,24 @@ func (v *Validator) Validate(src []byte) (*Rules, error) {
 }
 
 type parser struct {
-	v     *Validator
-	lex   *lexer
-	count int
+	v       *Validator
+	lex     *lexer
+	count   int
+	regexes int
+}
+
+// maxRegexes limits regular expressions per rule set; each one may run on
+// every request to the domain.
+const maxRegexes = 50
+
+func (p *parser) countRegex(d *Directive) error {
+	if d.Name == "rewrite" || (d.Name == "location" && len(d.Args) == 2 && strings.HasPrefix(d.Args[0], "~")) {
+		p.regexes++
+		if p.regexes > maxRegexes {
+			return errAt(d.at(-1), "too many regular expressions (limit %d)", maxRegexes)
+		}
+	}
+	return nil
 }
 
 // block parses directives until the end of input (open == nil) or the '}'
@@ -115,6 +130,9 @@ func (p *parser) directive(name token, depth int) (*Directive, error) {
 			if err := p.v.check(d); err != nil {
 				return nil, err
 			}
+			if err := p.countRegex(d); err != nil {
+				return nil, err
+			}
 			return d, nil
 		case tokLBrace:
 			if d.Name != "location" {
@@ -124,6 +142,9 @@ func (p *parser) directive(name token, depth int) (*Directive, error) {
 				return nil, errAt(t.pos, "locations are nested too deeply (limit %d)", p.v.maxDepth)
 			}
 			if err := p.v.check(d); err != nil {
+				return nil, err
+			}
+			if err := p.countRegex(d); err != nil {
 				return nil, err
 			}
 			children, err := p.block(depth+1, &t.pos)

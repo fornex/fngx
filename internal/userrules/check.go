@@ -110,7 +110,62 @@ func checkRegex(d *Directive, i int) error {
 			return errAt(d.at(i), "PCRE callouts are not allowed")
 		}
 	}
+	if nestedQuantifier(re) {
+		return errAt(d.at(i), "nested repetition such as (a+)+ is not allowed: it can make matching very slow")
+	}
 	return nil
+}
+
+// nestedQuantifier reports a group that contains an unbounded quantifier
+// (*, + or {n,}) and is itself repeated by *, + or {. Such patterns can
+// backtrack exponentially; a client regex runs in workers shared by every
+// site on the server. The scan is conservative: it may reject some safe
+// patterns.
+func nestedQuantifier(re string) bool {
+	var stack []bool // per open group: contains an unbounded quantifier
+	inner := false   // the same for the current top level
+	for j := 0; j < len(re); j++ {
+		switch c := re[j]; c {
+		case '\\':
+			j++
+		case '[':
+			// Skip a character class; ']' right after '[' or '[^' is literal.
+			k := j + 1
+			if k < len(re) && re[k] == '^' {
+				k++
+			}
+			if k < len(re) && re[k] == ']' {
+				k++
+			}
+			for k < len(re) && re[k] != ']' {
+				if re[k] == '\\' {
+					k++
+				}
+				k++
+			}
+			j = k
+		case '(':
+			stack = append(stack, inner)
+			inner = false
+		case ')':
+			if len(stack) == 0 {
+				continue // unbalanced; nginx -t reports it
+			}
+			group := inner
+			inner = stack[len(stack)-1] || group
+			stack = stack[:len(stack)-1]
+			if group && j+1 < len(re) && strings.IndexByte("*+{", re[j+1]) >= 0 {
+				return true
+			}
+		case '*', '+':
+			inner = true
+		case '{':
+			if k := strings.IndexByte(re[j:], '}'); k > 0 && strings.HasSuffix(re[j:j+k], ",") {
+				inner = true
+			}
+		}
+	}
+	return false
 }
 
 // rewrite regex replacement [flag]
@@ -137,7 +192,7 @@ func checkRewrite(d *Directive) error {
 		strings.HasPrefix(repl, "http://") || strings.HasPrefix(repl, "https://") ||
 		strings.HasPrefix(repl, "$scheme")
 	if external {
-		return checkVars(d, 1, true)
+		return checkVars(d, 1, scopeRedirect)
 	}
 	// An internal rewrite changes the URI that is later mapped to a file
 	// under the document root. nginx does not normalize the new URI, so the
@@ -155,7 +210,7 @@ func checkRewrite(d *Directive) error {
 		return errAt(d.at(1), "'\\' and '%%' are not allowed in the path of an internal rewrite target")
 	}
 	if hasQuery {
-		return checkVars(d, 1, true)
+		return checkVars(d, 1, scopeQuery)
 	}
 	return nil
 }
@@ -176,7 +231,7 @@ func checkReturn(d *Directive) error {
 		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "$scheme") {
 			return errAt(d.at(0), "return without a code needs a URL starting with http://, https:// or $scheme")
 		}
-		return checkVars(d, 0, false)
+		return checkVars(d, 0, scopeSafe)
 	}
 	if code < 200 || code > 599 {
 		return errAt(d.at(0), "status code must be between 200 and 599")
@@ -185,7 +240,7 @@ func checkReturn(d *Directive) error {
 		if redirectCodes[code] && d.Args[1] == "" {
 			return errAt(d.at(1), "redirect URL is empty")
 		}
-		return checkVars(d, 1, false)
+		return checkVars(d, 1, scopeSafe)
 	}
 	return nil
 }
@@ -230,7 +285,7 @@ func checkAddHeader(d *Directive) error {
 	if len(d.Args) == 3 && d.Args[2] != "always" {
 		return errAt(d.at(2), "third argument of add_header can only be \"always\"")
 	}
-	return checkVars(d, 1, false)
+	return checkVars(d, 1, scopeSafe)
 }
 
 // expiresTime follows https://nginx.org/en/docs/syntax.html: a number with an
@@ -284,7 +339,7 @@ func checkAccess(d *Directive) error {
 // arguments are unknown, so every '$' must be a safe variable reference.
 func checkGeneric(d *Directive) error {
 	for i := range d.Args {
-		if err := checkVars(d, i, false); err != nil {
+		if err := checkVars(d, i, scopeSafe); err != nil {
 			return err
 		}
 	}
@@ -321,6 +376,23 @@ var safeVars = map[string]bool{
 	"time_local":      true,
 }
 
+// varScope selects which references checkVars allows.
+type varScope int
+
+const (
+	scopeSafe     varScope = iota // safeVars, no captures
+	scopeRedirect                 // safeVars and captures
+	scopeQuery                    // queryVars and captures
+)
+
+// queryVars may appear after '?' in an internal rewrite target.
+var queryVars = map[string]bool{
+	"args":         true,
+	"is_args":      true,
+	"query_string": true,
+	"request_uri":  true,
+}
+
 var safeVarPrefixes = []string{"arg_", "cookie_", "http_"}
 
 func isVarChar(c byte) bool {
@@ -343,7 +415,8 @@ func isVarChar(c byte) bool {
 // the decoded URI. This is an assumption to confirm on the test server
 // (Q-6): without it a capture could split the Location header or, after a
 // proxied internal rewrite, the request line sent to the backend.
-func checkVars(d *Directive, i int, captures bool) error {
+func checkVars(d *Directive, i int, scope varScope) error {
+	captures := scope != scopeSafe
 	s := d.Args[i]
 	for j := 0; j < len(s); j++ {
 		if s[j] != '$' {
@@ -385,17 +458,26 @@ func checkVars(d *Directive, i int, captures bool) error {
 		default:
 			return errAt(d.at(i), "'$' must be followed by a variable name; nginx has no escape for '$'")
 		}
-		if err := checkVarName(d, i, name); err != nil {
+		if err := checkVarName(d, i, name, scope); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func checkVarName(d *Directive, i int, name string) error {
+func checkVarName(d *Directive, i int, name string, scope varScope) error {
 	lower := strings.ToLower(name)
 	if lower == "uri" || lower == "document_uri" {
 		return errAt(d.at(i), "variable $%s is not allowed: it holds the decoded URI and can inject line breaks; use $request_uri", name)
+	}
+	if scope == scopeQuery {
+		// The query of an internal rewrite is copied unescaped into the
+		// request line sent to a backend, so only variables that come from
+		// the request line itself are allowed there.
+		if queryVars[lower] || (len(lower) > len("arg_") && strings.HasPrefix(lower, "arg_")) {
+			return nil
+		}
+		return errAt(d.at(i), "variable $%s is not allowed in the query of an internal rewrite; use $args, $arg_name, $query_string, $is_args or $request_uri", name)
 	}
 	if safeVars[lower] {
 		return nil
