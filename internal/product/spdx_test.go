@@ -6,14 +6,20 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
 
 const spdxLine = "// SPDX-License-Identifier: GPL-3.0-or-later"
 
-// TestSPDXHeaders checks that every Go source file in the repository
-// starts with the project license identifier.
+// generated matches the standard marker of generated Go files
+// (https://pkg.go.dev/cmd/go#hdr-Generate_Go_files_by_processing_source).
+var generated = regexp.MustCompile(`(?m)^// Code generated .* DO NOT EDIT\.$`)
+
+// TestSPDXHeaders checks that every hand-written Go source file in the
+// repository starts with the project license identifier.
+// It assumes this package is two directories below the repository root.
 func TestSPDXHeaders(t *testing.T) {
 	root := filepath.Join("..", "..")
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
@@ -39,9 +45,13 @@ func TestSPDXHeaders(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		if generated.Match(data) {
+			return nil
+		}
 		first, _, _ := strings.Cut(string(data), "\n")
-		if first != spdxLine {
-			t.Errorf("%s: first line must be %q", path, spdxLine)
+		if strings.TrimSuffix(first, "\r") != spdxLine {
+			rel, _ := filepath.Rel(root, path)
+			t.Errorf("%s: first line must be %q", rel, spdxLine)
 		}
 		return nil
 	})
