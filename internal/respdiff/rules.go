@@ -93,11 +93,12 @@ type HeaderPattern struct {
 	Pattern
 }
 
-// HeaderRule sets the severity of a change of the named headers.
-// Removed, if set, is used instead when the header disappears.
+// HeaderRule sets the severity of a change of the named headers; it is
+// required, so a forgotten field cannot silently mean "ignore". Removed,
+// if set, is used instead when the header disappears.
 type HeaderRule struct {
 	Names    []string  `json:"names"`
-	Severity Severity  `json:"severity"`
+	Severity *Severity `json:"severity"`
 	Removed  *Severity `json:"removed,omitempty"`
 	Note     string    `json:"note,omitempty"`
 }
@@ -143,6 +144,11 @@ const DefaultRulesJSON = `{
       "name": "nonce-attribute",
       "regexp": "(?i)\\bnonce=[\"']([^\"']*)[\"']",
       "note": "CSP nonces on script and style tags"
+    },
+    {
+      "name": "html-comment",
+      "regexp": "(?s)<!--(.*?)-->",
+      "note": "HTML comments: page caches (WP Super Cache, W3 Total Cache, WP Fastest Cache) put generation times there, and visitors never see them"
     },
     {
       "name": "nonce-json",
@@ -330,6 +336,9 @@ func compileRules(user *Rules) (*compiledRules, error) {
 		if len(hr.Names) == 0 {
 			return nil, fmt.Errorf("%w: header rule without names", ErrInvalid)
 		}
+		if hr.Severity == nil {
+			return nil, fmt.Errorf("%w: header rule for %q without severity", ErrInvalid, hr.Names[0])
+		}
 		for _, n := range hr.Names {
 			k := http.CanonicalHeaderKey(n)
 			if k == "" || strings.ContainsAny(k, " \t:") {
@@ -354,11 +363,11 @@ func (c *compiledRules) headerSeverity(k string) (changed, removed Severity) {
 	if !ok {
 		return c.other, c.other
 	}
-	removed = hr.Severity
+	removed = *hr.Severity
 	if hr.Removed != nil {
 		removed = *hr.Removed
 	}
-	return hr.Severity, removed
+	return *hr.Severity, removed
 }
 
 // mask replaces the first capture group of every match of rx in b with

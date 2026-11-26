@@ -244,7 +244,7 @@ func TestRequestIsSafe_N7(t *testing.T) {
 		seen = append(seen, r.Clone(context.Background()))
 		mu.Unlock()
 		if r.URL.Path == "/" {
-			http.SetCookie(w, &http.Cookie{Name: "s", Value: "secret"})
+			http.SetCookie(w, &http.Cookie{Name: "s", Value: "secret", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
 			http.Redirect(w, r, "/next", http.StatusFound)
 		}
 	}))
@@ -396,7 +396,7 @@ func TestSlowBodyTimesOut(t *testing.T) {
 	cfg.Timeout = 200 * time.Millisecond
 	r := take(t, cfg, "example.com").Results[0]
 	if r.Error == nil || r.Error.Kind != ErrKindTimeout || r.Status != 200 {
-		t.Fatalf("result %+v", r)
+		t.Fatalf("result %+v, error %+v", r, r.Error)
 	}
 }
 

@@ -44,7 +44,9 @@
 // A body that differs only because the page is dynamic cannot be told
 // from a real change by one request. A snapshot taken with Repeat >= 2
 // requests each target again and marks bodies that changed between the
-// requests as unstable. Body changes are critical only when the baseline
+// requests as unstable. Body changes are critical when the baseline
 // proved the body stable, informational when it proved it unstable, and
-// warnings otherwise.
+// warnings otherwise; a changed page title or a more than twofold change
+// in size is critical either way, and so is an answer that was stable
+// before and varies after.
 package respdiff

@@ -33,7 +33,7 @@ func (r *Report) WriteText(w io.Writer, verbose bool) {
 	if len(r.Notes) > 0 {
 		fmt.Fprintln(w, "\nNotes:")
 		for _, n := range r.Notes {
-			fmt.Fprintf(w, "  - %s\n", n)
+			fmt.Fprintf(w, "  - %s\n", clean(n))
 		}
 	}
 	c := r.Counts

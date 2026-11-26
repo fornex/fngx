@@ -7,11 +7,12 @@ a mode switch or an upgrade.
 ## Workflow
 
 ```sh
-# 1. Before the change: record the baseline. -repeat 2 requests each
-#    target twice to learn which pages are dynamic.
-fngx respdiff snapshot -server 192.0.2.10 -targets domains.txt -out before.json -repeat 2
+# 1. Before the change: record the baseline. By default (-repeat 2) each
+#    target is requested twice to learn which pages are dynamic.
+fngx respdiff snapshot -server 192.0.2.10 -targets domains.txt -out before.json
 
-# 2. Make the change, then record again (one request per target is enough).
+# 2. Make the change, then record again. Repeating here too finds answers
+#    that alternate (for example every second request failing).
 fngx respdiff snapshot -server 192.0.2.10 -targets domains.txt -out after.json
 
 # 3. Compare. Exit code 0: no significant differences; 3: differences;
@@ -30,8 +31,10 @@ header and in TLS SNI; DNS is not used.
 
 The server is usually in production. The defaults: 8 requests in flight,
 10 requests started per second, 15 s per request, 1 MiB of body read per
-response, one retry after a network error. 10,000 domains on HTTP and
-HTTPS take about 35 minutes; `-repeat 2` doubles that. Only GET (or HEAD
+response, one retry after a network error, two requests per target and
+scheme. 10,000 domains on HTTP and HTTPS take about 70 minutes; `-repeat 1`
+halves that at the cost of weaker body checks. The rate must be between
+0.01 and 1000 requests per second. Only GET (or HEAD
 with `-method HEAD`) is sent, never with cookies or credentials, and
 redirects are not followed.
 
@@ -55,17 +58,28 @@ In short:
 | Status, redirect target (`Location`), media type | critical |
 | Request fails after but worked before | critical |
 | Security header removed (HSTS, CSP, X-Frame-Options, ...) | critical |
-| Body changed, baseline proved it stable (`-repeat 2`) | critical |
-| Body changed, stability unknown | warning |
-| Body changed on a page that changes between identical requests | info |
+| Body changed, baseline proved it stable | critical |
+| Answers stable before, varying after (flaky backend) | critical |
+| Body changed and the page title changed or the size changed more than twofold (or became empty) | critical |
+| Body changed otherwise, baseline taken with `-repeat 1` | warning |
+| Body changed otherwise on a page that varies between identical requests | info |
 | Body of a redirect / error page changed, same status | info / at most warning |
 | Caching, compression, cookies (names and attributes), CORS headers | warning |
 | `Server`, `X-Powered-By`, unknown headers, TLS version | info |
 | `Date`, `Age`, `Expires`, `ETag`, `Last-Modified`, request IDs, cache status | ignored |
 
 Before hashing, text bodies are normalized: CSRF tokens in meta tags and
-hidden fields, CSP nonces and nonces in inline JavaScript are replaced by
-`-`. Set-Cookie values are never stored. `-fail-on warning` makes warnings
+hidden fields, CSP nonces, nonces in inline JavaScript and the content of
+HTML comments (where page caches put generation times) are replaced by
+`-`. `application/javascript` and `text/javascript` count as the same
+media type.
+
+Pages that only change slowly (a "latest posts" list, a cache regenerated
+between the two snapshots) cannot be told from real changes by repeating a
+request a second later; expect a few such critical findings on large
+servers and check them by hand.
+
+Set-Cookie values are never stored. `-fail-on warning` makes warnings
 fail the check too.
 
 ## Custom rules

@@ -61,8 +61,11 @@ type Result struct {
 	Status int                 `json:"status,omitempty"`
 	Proto  string              `json:"proto,omitempty"`
 	Header map[string][]string `json:"header,omitempty"`
-	Body   *BodyInfo           `json:"body,omitempty"`
-	TLS    *TLSInfo            `json:"tls,omitempty"`
+	// HeaderTruncated is set when the headers exceeded the recorded size
+	// limit and some were dropped.
+	HeaderTruncated bool      `json:"header_truncated,omitempty"`
+	Body            *BodyInfo `json:"body,omitempty"`
+	TLS             *TLSInfo  `json:"tls,omitempty"`
 	// TimeMS is the time of the last attempt, until the body was read;
 	// TTFBMS until the first response byte.
 	TimeMS   int64 `json:"time_ms"`
@@ -106,6 +109,10 @@ type BodyInfo struct {
 	// Stable is set when the snapshot was taken with Repeat >= 2: true
 	// when every repeat returned the same status and normalized body.
 	Stable *bool `json:"stable,omitempty"`
+	// Unstable says how a repeat differed when Stable is false.
+	Unstable string `json:"unstable,omitempty"`
+	// Title is the normalized HTML <title>, if any.
+	Title string `json:"title,omitempty"`
 }
 
 // TLSInfo describes the TLS connection and the server certificate.
@@ -175,8 +182,8 @@ func (s *Snapshot) validate() error {
 	if s.Version != SnapshotVersion {
 		return bad("unsupported version %d, want %d", s.Version, SnapshotVersion)
 	}
-	if _, err := netip.ParseAddr(s.Server); err != nil {
-		return bad("server: %v", err)
+	if a, err := netip.ParseAddr(s.Server); err != nil || a.Zone() != "" {
+		return bad("server %q", s.Server)
 	}
 	o := s.Options
 	if o.Method != http.MethodGet && o.Method != http.MethodHead {
@@ -187,6 +194,9 @@ func (s *Snapshot) validate() error {
 	}
 	if o.MaxBody < 0 || o.Repeat < 0 || o.Retries < 0 || o.TimeoutMS < 0 {
 		return bad("negative option")
+	}
+	if o.HTTPPort < 1 || o.HTTPPort > 65535 || o.HTTPSPort < 1 || o.HTTPSPort > 65535 {
+		return bad("port out of range")
 	}
 	seen := make(map[string]bool, len(s.Results))
 	for i := range s.Results {
@@ -221,6 +231,10 @@ func (s *Snapshot) validate() error {
 // WriteFile stores the snapshot atomically with mode 0600. Unless
 // overwrite is set it fails when path exists, so a baseline is not lost
 // by a mistyped command.
+//
+// If the last step fails, the complete snapshot is kept in a temporary
+// file next to path and the error names it: a snapshot of a large server
+// takes long to retake.
 func (s *Snapshot) WriteFile(path string, overwrite bool) (err error) {
 	data, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
@@ -231,8 +245,13 @@ func (s *Snapshot) WriteFile(path string, overwrite bool) (err error) {
 	if err != nil {
 		return err
 	}
+	complete := false
 	defer func() {
-		_ = os.Remove(tmp.Name())
+		if err == nil || !complete {
+			_ = os.Remove(tmp.Name())
+		} else {
+			err = fmt.Errorf("%w; the snapshot is kept in %s", err, tmp.Name())
+		}
 	}()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
@@ -245,15 +264,21 @@ func (s *Snapshot) WriteFile(path string, overwrite bool) (err error) {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	complete = true
 	if overwrite {
 		return os.Rename(tmp.Name(), path)
 	}
-	// A hard link fails if path exists, unlike rename.
-	if err := os.Link(tmp.Name(), path); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("%s exists; refusing to overwrite", path)
-		}
-		return err
+	// A hard link fails if path exists, unlike rename. Some file systems
+	// have no hard links; there, check and rename (not atomic).
+	err = os.Link(tmp.Name(), path)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, os.ErrExist):
+		return fmt.Errorf("%s exists; refusing to overwrite", path)
 	}
-	return nil
+	if _, serr := os.Lstat(path); !errors.Is(serr, os.ErrNotExist) {
+		return fmt.Errorf("%s exists or cannot be checked; refusing to overwrite (link: %w)", path, err)
+	}
+	return os.Rename(tmp.Name(), path)
 }

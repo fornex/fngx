@@ -135,13 +135,24 @@ func TestSnapshotFile(t *testing.T) {
 	if err := s.WriteFile(path, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.WriteFile(path, false); err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
+	// A failed final step keeps the complete snapshot and names it.
+	err := s.WriteFile(path, false)
+	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") || !strings.Contains(err.Error(), "kept in") {
 		t.Errorf("second write: %v", err)
 	}
+	kept, _ := filepath.Glob(filepath.Join(dir, ".respdiff-*"))
+	if len(kept) != 1 {
+		t.Fatalf("kept files: %v", kept)
+	}
+	if _, err := LoadSnapshotFile(kept[0]); err != nil {
+		t.Errorf("kept snapshot: %v", err)
+	}
+	_ = os.Remove(kept[0])
 	if err := s.WriteFile(path, true); err != nil {
 		t.Errorf("overwrite: %v", err)
 	}
-	fi, err := os.Stat(path)
+	var fi os.FileInfo
+	fi, err = os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}

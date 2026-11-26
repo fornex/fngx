@@ -7,7 +7,9 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -96,6 +98,9 @@ func Compare(before, after *Snapshot, rules *Rules) (*Report, error) {
 	}
 	cmp := comparer{rules: c, before: before, after: after}
 	cmp.setup()
+	if rules != nil && len(rules.BodyPatterns) > 0 {
+		cmp.note("The body patterns of the rules file have no effect here: they apply when a snapshot is taken (pass -rules to snapshot).")
+	}
 	rep := &Report{
 		Version: ReportVersion,
 		Before:  meta(before),
@@ -233,7 +238,7 @@ func (c *comparer) setup() {
 		}
 	}
 	if !c.noBody && c.before.Options.Repeat < 2 {
-		c.note("The baseline was taken with repeat 1, so it is unknown which bodies are dynamic: body changes are reported as warnings, not critical. Take the baseline with -repeat 2 to classify them.")
+		c.note("The baseline was taken with repeat 1, so it is unknown which bodies are dynamic: a body change is critical only if the page title or the size changed sharply, otherwise a warning. Take the baseline with -repeat 2 to classify them.")
 	}
 }
 
@@ -246,6 +251,10 @@ func (c *comparer) result(b, a *Result) []Change {
 	if b.Error != nil || a.Error != nil {
 		if e := compareErrors(b, a); e != nil {
 			ch = append(ch, *e)
+		} else if b.Status != a.Status {
+			// Same failure (a body timeout, say) after different answers.
+			ch = append(ch, Change{Field: "status", Severity: SevCritical,
+				Before: fmt.Sprint(b.Status), After: fmt.Sprint(a.Status)})
 		}
 		if b.TLS != nil && a.TLS != nil {
 			ch = append(ch, c.tls(b.TLS, a.TLS)...)
@@ -258,9 +267,7 @@ func (c *comparer) result(b, a *Result) []Change {
 	}
 	ch = append(ch, c.headers(b, a)...)
 	if !c.noBody && b.Body != nil && a.Body != nil {
-		if bc := c.body(b.Body, a.Body, b.Status, a.Status); bc != nil {
-			ch = append(ch, *bc)
-		}
+		ch = append(ch, c.body(b.Body, a.Body, b.Status, a.Status)...)
 	}
 	if b.TLS != nil && a.TLS != nil {
 		ch = append(ch, c.tls(b.TLS, a.TLS)...)
@@ -284,6 +291,9 @@ func compareErrors(b, a *Result) *Change {
 	case a.Error == nil:
 		ch.Severity = SevWarning
 		ch.Note = "failed before, answers after"
+	case b.Error.Kind == ErrKindTLSVerify && a.Error.Kind != ErrKindTLSVerify:
+		ch.Severity = SevCritical
+		ch.Note = "the TLS handshake reached the certificate before, fails otherwise after"
 	case b.Error.Kind != a.Error.Kind:
 		ch.Severity = SevWarning
 		ch.Note = "fails differently"
@@ -404,6 +414,9 @@ func normContentType(v string) string {
 	if err != nil {
 		return strings.ToLower(strings.Join(strings.Fields(v), ""))
 	}
+	if jsAliases[mt] {
+		mt = "text/javascript" // RFC 9239
+	}
 	keys := make([]string, 0, len(params))
 	for k := range params {
 		keys = append(keys, k)
@@ -443,13 +456,23 @@ func normLocation(v string, r *Result, port int) string {
 	}
 	u := base.ResolveReference(ref)
 	u.Scheme = strings.ToLower(u.Scheme)
-	host, p := strings.ToLower(u.Hostname()), u.Port()
+	host, p := strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), u.Port()
 	if (u.Scheme == "http" && p == "80") || (u.Scheme == "https" && p == "443") || p == "" {
 		u.Host = host
 	} else {
 		u.Host = host + ":" + p
 	}
-	return u.String()
+	// Percent-encodings are case-insensitive (RFC 3986 section 6.2.2.1).
+	return pctRx.ReplaceAllStringFunc(u.String(), strings.ToUpper)
+}
+
+var pctRx = regexp.MustCompile(`%[0-9a-fA-F]{2}`)
+
+// jsAliases are media types servers use for JavaScript; mime.types of
+// Apache and of nginx versions disagree on which one to send.
+var jsAliases = map[string]bool{
+	"application/javascript": true, "application/x-javascript": true,
+	"application/ecmascript": true, "text/ecmascript": true,
 }
 
 func bodyText(b *BodyInfo, raw bool) string {
@@ -467,25 +490,49 @@ func bodyText(b *BodyInfo, raw bool) string {
 	return s
 }
 
-func (c *comparer) body(b, a *BodyInfo, bstatus, astatus int) *Change {
+// body compares two bodies. The baseline decides how much a change
+// matters: proved stable, critical; proved dynamic, info; unknown,
+// warning. Two signals do not depend on that and make a change critical:
+// a different page title and a sharp change in size, which is what a
+// wrong virtual host, a default page or a blank PHP error look like.
+func (c *comparer) body(b, a *BodyInfo, bstatus, astatus int) []Change {
+	var out []Change
+	bStable, aStable := b.Stable != nil && *b.Stable, a.Stable != nil && *a.Stable
+	if bStable && a.Stable != nil && !aStable {
+		out = append(out, Change{Field: "body.stability", Severity: SevCritical,
+			Before: "stable", After: "varies: " + a.Unstable,
+			Note: "identical requests get different answers after; the first one is compared below"})
+	}
 	same := b.NormSHA256 == a.NormSHA256
 	if c.rawBody {
 		same = b.SHA256 == a.SHA256
 	}
 	if same {
-		return nil
+		return out
 	}
-	ch := &Change{Field: "body", Before: bodyText(b, c.rawBody), After: bodyText(a, c.rawBody)}
+	ch := Change{Field: "body", Before: bodyText(b, c.rawBody), After: bodyText(a, c.rawBody)}
 	switch {
-	case (b.Stable != nil && !*b.Stable) || (a.Stable != nil && !*a.Stable):
+	case b.Stable != nil && !bStable:
 		ch.Severity = SevInfo
-		ch.Note = "the body changes between identical requests (dynamic page)"
-	case b.Stable != nil && *b.Stable:
+		ch.Note = "the body changes between identical requests in the baseline (" + b.Unstable + ")"
+	case bStable:
 		ch.Severity = SevCritical
 		ch.Note = "the body was stable across repeated requests in the baseline"
 	default:
 		ch.Severity = SevWarning
 		ch.Note = "unknown whether the page is dynamic; take the baseline with -repeat 2"
+	}
+	if ch.Severity < SevCritical && bstatus == astatus && bstatus < 300 {
+		switch {
+		case b.Title != a.Title:
+			ch.Severity = SevCritical
+			ch.Note = "the page title changed"
+			ch.Before += ", title " + strconv.Quote(b.Title)
+			ch.After += ", title " + strconv.Quote(a.Title)
+		case sharpSizeChange(b, a):
+			ch.Severity = SevCritical
+			ch.Note = "the size changed more than twofold"
+		}
 	}
 	// Redirect and error pages are generated by the web server, and
 	// Apache and nginx word them differently; the status and Location
@@ -501,7 +548,21 @@ func (c *comparer) body(b, a *BodyInfo, bstatus, astatus int) *Change {
 	if b.Undecoded || a.Undecoded {
 		ch.Note += "; an encoded body was hashed without decoding"
 	}
-	return ch
+	return append(out, ch)
+}
+
+// sharpSizeChange reports a change of more than a factor of two, or to
+// or from empty, ignoring small bodies where that is common.
+func sharpSizeChange(b, a *BodyInfo) bool {
+	const small = 512
+	if b.Truncated && a.Truncated {
+		return false
+	}
+	lo, hi := min(b.Length, a.Length), max(b.Length, a.Length)
+	if hi < small {
+		return b.Length > 0 && a.Length == 0
+	}
+	return lo*2 < hi
 }
 
 func certText(t *TLSInfo) string {

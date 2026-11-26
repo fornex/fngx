@@ -3,6 +3,7 @@
 package respdiff
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
@@ -19,11 +20,14 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/netip"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/fornex/fngx/internal/product"
 )
@@ -43,7 +47,7 @@ const (
 
 // Defaults and limits for [Config]. The defaults are meant to be gentle
 // on a production server: 10,000 domains on two schemes take about
-// 35 minutes at 10 requests per second.
+// 35 minutes at 10 requests per second, twice that with Repeat 2.
 const (
 	DefaultConcurrency = 8
 	DefaultRate        = 10
@@ -52,13 +56,16 @@ const (
 	DefaultRetries     = 1
 
 	MaxConcurrency = 256
+	MinRate        = 0.01
 	MaxRate        = 1000
 	MaxRepeat      = 5
 	MaxRetries     = 3
 	MaxMaxBody     = 64 << 20
 
-	maxHeaderBytes = 64 << 10
-	maxMessageLen  = 300
+	maxHeaderBytes   = 64 << 10
+	maxRecordedBytes = 8 << 10 // header bytes stored per response
+	maxMessageLen    = 300
+	maxTitle         = 200
 )
 
 // Config configures [Take].
@@ -95,7 +102,7 @@ type Config struct {
 }
 
 func (c *Config) setDefaults() error {
-	if !c.Server.IsValid() || c.Server.IsUnspecified() || c.Server.IsMulticast() {
+	if !c.Server.IsValid() || c.Server.IsUnspecified() || c.Server.IsMulticast() || c.Server.Zone() != "" {
 		return fmt.Errorf("%w: server address %q", ErrInvalid, c.Server)
 	}
 	c.Server = c.Server.Unmap()
@@ -156,8 +163,10 @@ func (c *Config) setDefaults() error {
 	if c.Rate == 0 {
 		c.Rate = DefaultRate
 	}
-	if c.Rate < 0 || c.Rate > MaxRate {
-		return fmt.Errorf("%w: rate must be up to %d requests per second", ErrInvalid, MaxRate)
+	// The negated form also rejects NaN, which compares false with
+	// everything and would disable the limiter.
+	if !(c.Rate >= MinRate && c.Rate <= MaxRate) {
+		return fmt.Errorf("%w: rate must be %g..%d requests per second", ErrInvalid, MinRate, MaxRate)
 	}
 	if c.Repeat < 1 {
 		c.Repeat = 1
@@ -382,8 +391,17 @@ func (p *prober) probe(ctx context.Context, t Target, scheme string) Result {
 	stable := true
 	for n := 1; n < p.cfg.Repeat && stable; n++ {
 		r := p.attempt(ctx, t, scheme)
-		stable = r.Error == nil && r.Status == first.Status && r.Body != nil &&
-			r.Body.NormSHA256 == first.Body.NormSHA256
+		switch {
+		case r.Error != nil:
+			first.Body.Unstable = fmt.Sprintf("repeat %d failed: %s", n+1, r.Error.Kind)
+		case r.Status != first.Status:
+			first.Body.Unstable = fmt.Sprintf("repeat %d returned status %d", n+1, r.Status)
+		case r.Body == nil || r.Body.NormSHA256 != first.Body.NormSHA256:
+			first.Body.Unstable = fmt.Sprintf("repeat %d returned another body", n+1)
+		default:
+			continue
+		}
+		stable = false
 	}
 	first.Body.Stable = &stable
 	return first
@@ -437,8 +455,11 @@ func (p *prober) once(parent context.Context, t Target, scheme string) Result {
 		port = p.cfg.HTTPSPort
 	}
 	start := time.Now()
+	// The trace callback runs on a transport goroutine that may still be
+	// running when a timed-out request returns.
+	var ttfb atomic.Int64
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
-		GotFirstResponseByte: func() { r.TTFBMS = time.Since(start).Milliseconds() },
+		GotFirstResponseByte: func() { ttfb.Store(time.Since(start).Milliseconds()) },
 	})
 	req, err := http.NewRequestWithContext(ctx, p.cfg.Method, t.URL(scheme, port), nil)
 	if err != nil {
@@ -451,6 +472,7 @@ func (p *prober) once(parent context.Context, t Target, scheme string) Result {
 	resp, err := p.client.Do(req)
 	if err != nil {
 		r.TimeMS = time.Since(start).Milliseconds()
+		r.TTFBMS = ttfb.Load()
 		r.Error = classify(parent, err)
 		if ce := (*certError)(nil); errors.As(err, &ce) {
 			r.TLS = ce.info
@@ -460,7 +482,7 @@ func (p *prober) once(parent context.Context, t Target, scheme string) Result {
 	defer func() { _ = resp.Body.Close() }()
 	r.Status = resp.StatusCode
 	r.Proto = resp.Proto
-	r.Header = recordHeader(resp.Header)
+	r.Header, r.HeaderTruncated = recordHeader(resp.Header)
 	if resp.TLS != nil {
 		r.TLS = tlsInfo(*resp.TLS)
 		if p.cfg.TLSMode == TLSStrict {
@@ -474,8 +496,16 @@ func (p *prober) once(parent context.Context, t Target, scheme string) Result {
 	if p.cfg.Method != http.MethodHead {
 		body, err := p.readBody(resp)
 		if err != nil {
+			// Only a deadline or cancellation keeps its kind: decode errors
+			// are not network failures and must not be retried.
+			// When the deadline closes the connection the read error
+			// does not say so; the request context does.
 			r.Error = classify(parent, err)
-			if r.Error.Kind == ErrKindOther {
+			switch {
+			case r.Error.Kind == ErrKindCanceled:
+			case ctx.Err() != nil:
+				r.Error.Kind = ErrKindTimeout
+			case r.Error.Kind != ErrKindTimeout:
 				r.Error.Kind = ErrKindBody
 			}
 		} else {
@@ -483,23 +513,29 @@ func (p *prober) once(parent context.Context, t Target, scheme string) Result {
 		}
 	}
 	r.TimeMS = time.Since(start).Milliseconds()
+	r.TTFBMS = ttfb.Load()
 	return r
 }
 
 func (p *prober) readBody(resp *http.Response) (*BodyInfo, error) {
 	b := &BodyInfo{Encoding: strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))}
-	var src io.Reader = resp.Body
-	switch b.Encoding {
+	br := bufio.NewReader(resp.Body)
+	var src io.Reader = br
+	enc := b.Encoding
+	if _, err := br.Peek(1); errors.Is(err, io.EOF) {
+		enc = "" // an empty body is empty whatever its declared encoding
+	}
+	switch enc {
 	case "", "identity":
 	case "gzip", "x-gzip":
-		zr, err := gzip.NewReader(resp.Body)
+		zr, err := gzip.NewReader(br)
 		if err != nil {
 			return nil, fmt.Errorf("gzip: %w", err)
 		}
 		defer func() { _ = zr.Close() }()
 		src = zr
 	case "deflate":
-		zr, err := zlib.NewReader(resp.Body)
+		zr, err := zlib.NewReader(br)
 		if err != nil {
 			return nil, fmt.Errorf("deflate: %w", err)
 		}
@@ -524,12 +560,32 @@ func (p *prober) readBody(resp *http.Response) (*BodyInfo, error) {
 	b.NormSHA256 = b.SHA256
 	if !b.Undecoded && isText(resp.Header.Get("Content-Type")) {
 		norm := p.rules.normalizeBody(data)
+		b.Title = htmlTitle(norm)
 		if !bytes.Equal(norm, data) {
 			sum := sha256.Sum256(norm)
 			b.NormSHA256 = hex.EncodeToString(sum[:])
 		}
 	}
 	return b, nil
+}
+
+var titleRx = regexp.MustCompile(`(?is)<title\b[^>]*>(.*?)</title`)
+
+// htmlTitle returns the normalized text of the first <title> element, at
+// most maxTitle characters, or "".
+func htmlTitle(b []byte) string {
+	m := titleRx.FindSubmatch(b)
+	if m == nil {
+		return ""
+	}
+	t := strings.Join(strings.Fields(string(m[1])), " ")
+	if !utf8.ValidString(t) {
+		t = strings.ToValidUTF8(t, "\uFFFD")
+	}
+	if r := []rune(t); len(r) > maxTitle {
+		t = string(r[:maxTitle])
+	}
+	return t
 }
 
 // isText reports whether body patterns apply to a body of this type. A
@@ -555,20 +611,31 @@ func isText(ct string) bool {
 // recordHeader copies the response header. Set-Cookie values are
 // replaced by their names and attributes: they may be session secrets
 // and change on every request anyway.
-func recordHeader(h http.Header) map[string][]string {
-	out := make(map[string][]string, len(h))
-	for k, vs := range h {
-		if k == "Set-Cookie" {
-			red := make([]string, len(vs))
-			for i, v := range vs {
-				red[i] = redactCookie(v)
-			}
-			out[k] = red
-			continue
-		}
-		out[k] = append([]string(nil), vs...)
+//
+// At most maxRecordedBytes are stored per response, so snapshots stay
+// loadable whatever the sites send; headers are taken in name order and
+// the rest is dropped, which truncated reports.
+func recordHeader(h http.Header) (out map[string][]string, truncated bool) {
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
 	}
-	return out
+	sort.Strings(keys)
+	out = make(map[string][]string, len(h))
+	size := 0
+	for _, k := range keys {
+		for _, v := range h[k] {
+			if k == "Set-Cookie" {
+				v = redactCookie(v)
+			}
+			size += len(k) + len(v)
+			if size > maxRecordedBytes {
+				return out, true
+			}
+			out[k] = append(out[k], v)
+		}
+	}
+	return out, false
 }
 
 // redactCookie keeps the cookie name and its attributes, lower-cased

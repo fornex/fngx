@@ -109,7 +109,7 @@ func runSnapshot(args []string, _, stderr io.Writer) int {
 	timeout := fs.Duration("timeout", respdiff.DefaultTimeout, "time limit per request, including the body")
 	maxBody := fs.Int64("max-body", respdiff.DefaultMaxBody, "body bytes read and hashed per response")
 	tlsMode := fs.String("tls", string(respdiff.TLSStrict), "certificate check: strict (invalid = error) or record (record and continue)")
-	repeat := fs.Int("repeat", 1, "requests per target to detect dynamic bodies; use 2 for a baseline")
+	repeat := fs.Int("repeat", 2, "requests per target and scheme; 2 or more detects dynamic pages and flaky answers")
 	retries := fs.Int("retries", respdiff.DefaultRetries, "extra attempts after a network error or timeout")
 	rulesPath := fs.String("rules", "", "rules file merged over the defaults")
 	quiet := fs.Bool("quiet", false, "do not report progress")
