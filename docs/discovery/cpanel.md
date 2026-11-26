@@ -33,13 +33,13 @@ I-6, I-7 (install and service).
 | 1 | Reading accounts, domains, SSL, IPs | Documented | WHM API 1 (`get_domain_info`, `listaccts`, `fetch_vhost_ssl_components`, `listips`) is the supported interface. `/var/cpanel/userdata/` exists but cPanel says not to edit it; its format is not specified. |
 | 2 | Standardized Hooks | Partly documented | Events exist for account create/modify/suspend/unsuspend/remove, subdomains, parked domains, SSL and AutoSSL install, PHP version changes. No WHM-level event for addon domains or SSL removal; client actions fire `Cpanel`-category events that run as the user. |
 | 3 | WHM plugin | Documented | AppConfig file in `/var/cpanel/apps/`, `register_appconfig`, CGI in `/usr/local/cpanel/whostmgr/docroot/cgi/`, ACL checks are mandatory. Backend language is free. |
-| 4 | cPanel plugin and root actions | Partly documented | `install.json` + `install_plugin` for Jupiter. Root actions go through AdminBin (Perl admin module recommended). **Third-party plugins are not available in the new Meridian theme.** |
+| 4 | cPanel plugin and root actions | Partly documented | `install.json` + `install_plugin` for Jupiter. Root actions go through AdminBin (Perl admin module recommended). **cPanel support says common third-party plugins are not yet available in the new Meridian theme.** |
 | 5 | Feature Manager | Documented | Each `install.json` link item becomes a feature; check with `verify_user_has_feature` (WHM) or `Features::has_feature` (UAPI). Unknown features read as granted. |
 | 6 | Apache ports and real client IP | Partly documented | Tweak Settings `apache_port` / `apache_ssl_port`; `mod_remoteip` is always installed with EA4 Apache. How ea-nginx changes the ports is not documented step by step. |
 | 7 | Service monitoring | Documented | chkservd: add a line to `/etc/chkserv.d/chkservd.conf` and a service file in `/etc/chkserv.d/`. |
 | 8 | AutoSSL, service subdomains, stats behind a proxy | Partly documented | DCV paths and service subdomain names are documented; how cPanel picks up a third-party nginx's logs for bandwidth and stats is not. AWStats, Webalizer and Analog are scheduled for removal. |
 | 9 | MultiPHP and PHP-FPM | Partly documented | EA4 pool layout, the YAML sources and the APIs are documented. alt-php is not covered by cPanel documentation. |
-| 10 | OS and versions, conflicts | Documented | AlmaLinux 8/9/10, CloudLinux 8/9/10 (7 deprecated), Ubuntu 24.04; 22.04 only on 134 LTS tiers. ea-nginx is documented as incompatible with LiteSpeed. No documented detection method for Engintron. |
+| 10 | OS and versions, conflicts | Documented | AlmaLinux 8/9/10, CloudLinux 8/9/10 (7 not recommended, cPanel 110 only), Ubuntu 24.04; 22.04 only on 134 LTS tiers. ea-nginx is documented as incompatible with LiteSpeed. No documented detection method for Engintron. |
 
 Findings that change the plan or earlier assumptions are collected in
 [Impact on the plan](#impact-on-the-plan).
@@ -112,9 +112,13 @@ it directly.
 
 - Release model: even major versions are production; LTS gets one release per
   year; non-LTS releases live a few months. The release table (page modified
-  2026-10-02) lists 110 LTS (EOL December 2026), 134 LTS (EOL June 2027),
-  136 (EOL August 2026) and 138 (EOL November 2026)
-  ([Product versions and release process][kb-release]).
+  2026-10-02) gives approximate end-of-life dates: 110 LTS December 2026,
+  134 LTS June 2027, 136 August 2026, 138 November 2026. The page adds that
+  a version is not EOL until the next one reaches the RELEASE tier, and that
+  110 is extended to 2028-01-01 under Extended Lifecycle Support for CentOS 7
+  and CloudLinux 7 servers ([Product versions and release process][kb-release]).
+  138's approximate EOL is this month, so a newer release may already exist;
+  check the changelog before fixing target versions.
 - Features are removed through a published deprecation plan
   ([cPanel deprecation plan][kb-deprecation]). cPanel API 2 is deprecated in
   favour of UAPI ([cPanel API 2][cpapi2]).
@@ -131,8 +135,10 @@ from cPanel (client side) is not stated for every event.
 ### Registration and data
 
 - Register with `/usr/local/cpanel/bin/manage_hooks add script <path>`;
-  without a `describe()` method the call needs `--manual --category --event
-  --stage` ([manage_hooks utility][hooks-manage]). The hooks data lives in
+  without a `describe()` method `--category` and `--event` are required
+  (the examples also pass `--manual` and `--stage`), and `--blocking` only
+  works when the hook has a `describe()` method
+  ([manage_hooks utility][hooks-manage]). The hooks data lives in
   `/var/cpanel/hooks/data/` and must not be edited by hand
   ([Guide to Standardized Hooks][hooks-guide]).
 - Scripts may be written in any language the shell can run, must be
@@ -186,7 +192,9 @@ the `pre` stage ([Whostmgr functions][hooks-whostmgr]).
 
 Gaps and caveats from the same pages:
 
-- **Addon domains.** No `Whostmgr` event is named for addon domains. UAPI
+- **Addon domains.** No `Whostmgr` event is named for addon domains. The
+  separate `ConvertAddon` category covers converting an addon domain into an
+  account, not creating one ([Hookable events][hooks-events]). UAPI
   creates an addon domain as a subdomain plus a domain parked on it
   ([`AddonDomain::addaddondomain`][uapi-addaddondomain],
   [`Park::park`][uapi-park]); WHM does the same with `create_subdomain` and
@@ -268,7 +276,8 @@ documented. Plugin support in the new Meridian theme is documented as
   `jupiter` as the theme ([Guide to cPanel plugins][cp-plugins]).
 - An `install.json` with `group` and `link` items is required and is
   installed with `/usr/local/cpanel/scripts/install_plugin`; only root can run
-  it; the script does not copy files, the plugin's own installer must
+  it; the script does not extract the archive or place the interface files,
+  the plugin's own installer must
   ([Guide to cPanel plugins][cp-plugins], [Add plugins][cp-plugins-add],
   [install_plugin script][script-install-plugin]). `--theme` defaults to
   `jupiter` ([install_plugin script][script-install-plugin]). Uninstall with
@@ -288,8 +297,9 @@ documented. Plugin support in the new Meridian theme is documented as
 
 ### Running privileged code: AdminBin
 
-AdminBin is the current documented mechanism; no successor is documented
-([Guide to API privilege escalation][adminbin]).
+AdminBin is the mechanism the current guide describes
+([Guide to API privilege escalation][adminbin]); no page found describes a
+successor.
 
 - Recommended: a Perl **admin module** subclassing `Cpanel::Admin::Base`,
   saved under `/var/cpanel/perl/Cpanel/Admin/Modules/<Namespace>/<Module>.pm`,
@@ -335,8 +345,10 @@ recommended method.
   ([support: plugins missing in Meridian][sup-meridian-plugins]).
 - The plugin guide and `install_plugin` only describe Jupiter.
 
-Consequence: a client on Meridian will not see the plugin's cPanel section
-(U-8, U-9). The theme per account is visible in `listaccts` (`theme`).
+The article names specific plugins and does not say every `install.json`
+plugin is hidden. Inference: a client on Meridian will not see the plugin's
+cPanel section (U-8, U-9); confirm on the server (item 8 below). The theme
+per account is visible in `listaccts` (`theme`).
 
 ## 5. Feature Manager (U-10)
 
@@ -378,11 +390,12 @@ section and finer rights kept in the plugin's own settings (A-3, M-5).
   defaults `0.0.0.0:80` and `0.0.0.0:443`; the page warns a wrong value can
   make sites unreachable ([Tweak Settings — System][tweak-system]).
 - The keys in `/var/cpanel/cpanel.config` are `apache_port` and
-  `apache_ssl_port`; cPanel recommends changing such values through the
-  interface ([cpanel.config file][kb-cpanel-config]). WHM API 1
+  `apache_ssl_port` ([cpanel.config file][kb-cpanel-config]). That page
+  recommends interface-only changes for some dynamic keys; these two keys
+  carry no such note. WHM API 1
   [`set_tweaksetting`][whm-set-tweaksetting] sets a Tweak Settings key and
   stores it in that file.
-- A support article shows the manual procedure with `0.0.0.0:81` and
+- A support article shows the Tweak Settings steps with `0.0.0.0:81` and
   `0.0.0.0:444` ([support: change the Apache port][sup-apache-port]).
 - Moving back for I-6 and I-7 is the same setting with the defaults.
 - Not documented: whether `set_tweaksetting` alone rebuilds `httpd.conf` and
@@ -396,8 +409,8 @@ section and finer rights kept in the plugin's own settings (A-3, M-5).
   in `/etc/nginx/conf.d/ea-nginx.conf`
   ([Default configuration of NGINX with reverse proxy][eanginx-default]).
   For the SSL port that page says "usually port 443", while the standalone
-  page says "usually port 444" ([NGINX Standalone][eanginx-standalone]); the
-  first looks like an error in the page.
+  page says "usually port 444" ([NGINX Standalone][eanginx-standalone]).
+  Inference: the first is a mistake in the page.
 - How ea-nginx changes the setting (Tweak Settings key or another method) is
   not described.
 
@@ -407,8 +420,9 @@ section and finer rights kept in the plugin's own settings (A-3, M-5).
   ([Advanced Apache configuration][ea4-advanced-apache]).
 - ea-nginx edits the proxy configuration so `REMOTE_ADDR` is correct, and
   asks admins to remove their own `RemoteIPHeader` and
-  `RemoteIPInternalProxy` lines; it changes
-  `/var/cpanel/templates/apache2_4/ea4_main.default`
+  `RemoteIPInternalProxy` lines; admins with a customised
+  `/var/cpanel/templates/apache2_4/ea4_main.local` must update it from
+  `ea4_main.default`
   ([Default configuration of NGINX with reverse proxy][eanginx-default]).
 - For a custom proxy, a support article describes: touch
   `/var/cpanel/no_apache_cloudflare`, add `RemoteIPHeader X-Forwarded-For` and
@@ -470,8 +484,9 @@ section and finer rights kept in the plugin's own settings (A-3, M-5).
 - Service subdomains (`cpanel.`, `whm.`, `webmail.`, `webdisk.`,
   `autodiscover.`, `autoconfig.`, `cpcalendars.`, `cpcontacts.`) are created
   for every domain; "cPanel & WHM uses Apache's configuration" to serve them;
-  they use the cPanel service certificate by default; the old name is "proxy
-  subdomains" ([Service and proxy subdomains][kb-service-subdomains]).
+  the page says SSL vhosts use the cPanel service certificate and, a line
+  later, that Domain TLS SNI is the default for their certificates; the old
+  name is "proxy subdomains" ([Service and proxy subdomains][kb-service-subdomains]).
   The table there gives the backend port for each (2083, 2087, 2096, 2080 and
   others).
 - Service subdomains are excluded from `get_domain_info`
@@ -489,8 +504,10 @@ section and finer rights kept in the plugin's own settings (A-3, M-5).
   ([Default configuration of NGINX with reverse proxy][eanginx-default]).
 - With ea-nginx, cPanel's Visitors, Errors and Raw Access interfaces do not
   work ([support: Apache logs empty with ea-nginx][sup-eanginx-logs]).
-- The same page says nginx traffic "will register in your user stats and
-  bandwidth programs", but not how. No page explains how a third-party nginx
+- The [default configuration page][eanginx-default] says that nginx rotates
+  its logs with logrotate and that "This activity will register in your user
+  stats and bandwidth programs"; it does not say how nginx logs reach those
+  programs. No page explains how a third-party nginx
   would feed cPanel bandwidth and stats processing. **Not documented — check
   on server**: in proxy and hybrid mode, does Apache still log to domlogs (so
   stats keep working)? In nginx mode, must nginx write domlogs in Apache's
@@ -548,8 +565,9 @@ detection.
 
 - AlmaLinux 8 (cPanel 110+), 9 (114+), 10 (132+)
   ([System requirements for AlmaLinux][req-alma]).
-- CloudLinux 7, 8, 9, 10; CloudLinux 7 is not recommended and will lose
-  support; CloudLinux 10 needs cPanel 134 or later
+- CloudLinux 7, 8, 9, 10; cPanel 112 or later cannot be installed on
+  CloudLinux 7, and the page does not recommend CloudLinux 7 because support
+  will be removed soon; CloudLinux 10 needs cPanel 134 or later
   ([System requirements for CloudLinux][req-cloudlinux]).
 - Ubuntu: new installations on 24.04 LTS only; an older Ubuntu "will block
   upgrades" to newer cPanel versions
@@ -581,8 +599,10 @@ The installer should check that 80/443 are free before starting nginx.
 
 ## Impact on the plan
 
-1. **Meridian hides third-party cPanel plugins.** U-8, U-9 and U-10 only
-   work for accounts on Jupiter until cPanel adds plugin support to Meridian
+1. **Meridian likely hides the plugin's cPanel section.** cPanel support says
+   common third-party plugins are not yet available in Meridian; inference:
+   U-8, U-9 and U-10 only work for accounts on Jupiter until cPanel adds plugin
+   support to Meridian
    ([support][sup-meridian-plugins]). Decision for the customer: keep
    Jupiter as the default theme on their servers, and show a warning in WHM
    for accounts on Meridian (`listaccts` gives `theme`).
@@ -600,7 +620,8 @@ The installer should check that 80/443 are free before starting nginx.
 5. **cPanel's own PHP-FPM pools must not be edited by hand.** PHP-4 (own pool
    template) needs a design choice in stage 2: drive cPanel's YAML or run
    separate pools.
-6. **Versions.** 136 reached end of life in August 2026 by the release table;
+6. **Versions.** The release table gives 136 an approximate end of life of
+   August 2026;
    current targets are 134 LTS and the latest even release. Ubuntu 22.04 is
    tied to 134 LTS.
 
@@ -637,8 +658,8 @@ section 6.
 | HANDOFF statement | What the pages say now |
 | --- | --- |
 | 6.1: in the OS table for 136, CloudLinux 10 is experimental and Ubuntu 22.04 unavailable | The table (updated 2026-09-25) marks CloudLinux 10 **supported** on 134 and 136; Ubuntu 22.04 is supported on 134 tiers and not available on 136 ([support: supported OS][sup-os]). |
-| 6.1: plans are built around cPanel & WHM 136 | 136 reached end of life in August 2026; 134 is the current LTS (to June 2027) and 138 is the newest release listed ([Product versions][kb-release]). |
-| Task brief: the current cPanel theme is Jupiter | Meridian is a new theme that can be set as default, and third-party plugins do not appear in it yet ([Meridian][meridian-welcome], [support][sup-meridian-plugins]). |
+| 6.1: plans are built around cPanel & WHM 136 | The release table gives 136 an approximate end of life of August 2026; 134 is the current LTS (approximately to June 2027) and 138 is the newest release listed ([Product versions][kb-release]). |
+| Task brief: the current cPanel theme is Jupiter | Meridian is a new theme that can be set as default; cPanel support says common third-party plugins do not appear in it yet ([Meridian][meridian-welcome], [support][sup-meridian-plugins]). |
 | 6.2: account and domain data in `/var/cpanel/userdata/` (from memory) | Confirmed to exist, but the documented interface is WHM API 1; the YAML is not to be edited and its schema is not published (section 1). |
 | 6.2: client root actions through AdminBin (from memory) | Confirmed; the documented preferred form is a Perl admin module (section 4). |
 | 6.1: cPanel plugin guide link built from a relative path | The link <https://api.docs.cpanel.net/guides/guide-to-cpanel-plugins> works. |
