@@ -1,0 +1,74 @@
+name: nginx build
+
+# Builds nginx with ModSecurity 3 from source in a clean container for every
+# supported OS image and runs the smoke tests (requirements I-2, M-1, S-1, S-3).
+# CloudLinux images are not freely available; CloudLinux is checked on a
+# real server.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "build/nginx/**"
+      - ".github/workflows/nginx-build.yml"
+  pull_request:
+    paths:
+      - "build/nginx/**"
+      - ".github/workflows/nginx-build.yml"
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: "nginx version to build (empty: the pinned default)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nginx-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck --version && shellcheck -x build/nginx/*.sh
+      - name: Product name matches internal/product
+        run: |
+          go_name="$(sed -n 's/^const Name = "\(.*\)"$/\1/p' internal/product/product.go)"
+          test -n "$go_name"
+          for f in build/nginx/build.sh build/nginx/smoke-test.sh; do
+            sh_name="$(sed -n 's/^PRODUCT="\${PRODUCT:-\(.*\)}"$/\1/p' "$f")"
+            echo "Go: '$go_name', $f: '$sh_name'"
+            test "$go_name" = "$sh_name"
+          done
+
+  build:
+    needs: lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["almalinux:8", "almalinux:9", "almalinux:10", "ubuntu:22.04", "ubuntu:24.04"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build and smoke test in ${{ matrix.image }}
+        env:
+          IMAGE: ${{ matrix.image }}
+          NGINX_VERSION_INPUT: ${{ inputs.nginx_version }}
+        run: |
+          args=()
+          if [ -n "${NGINX_VERSION_INPUT:-}" ]; then
+            args=(--nginx-version "$NGINX_VERSION_INPUT")
+          fi
+          echo "runner: $(nproc) CPUs, $(free -g | awk '/^Mem:/ {print $2}') GB RAM"
+          build/nginx/run-in-container.sh "$IMAGE" "${args[@]}"
