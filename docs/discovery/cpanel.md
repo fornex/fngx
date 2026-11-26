@@ -549,7 +549,7 @@ cPanel documentation.
 - Inference for PHP-4 (own pool template): cPanel's generated pools cannot
   be edited directly, so either the plugin feeds its values through the
   documented YAML files, or it runs its own pools. This is a design decision
-  for stage 2; Cpnginx documents its own pool template (HANDOFF 6.1).
+  for stage 2; Cpnginx documents its own pool template ([Cpnginx: PHP-FPM ini templates](https://docs.cpnginx.com/books/cpnginx-documentation-vol-130/page/php-fpm-ini-templates)).
 - CloudLinux: cPanel documents CloudLinux Manager and points to CloudLinux
   for `mod_lsapi` ([CloudLinux Manager][whm-cloudlinux-manager],
   [PHP handlers][ea4-php-handlers]). alt-php and alt-php-fpm are not
@@ -650,21 +650,20 @@ The installer should check that 80/443 are free before starting nginx.
 | 19 | Detection of ea-nginx, Engintron, LiteSpeed on a real server | I-4 | Partly documented |
 | 20 | Transfers (`Transfers::Session`) and service proxying during live transfer | A-2 | Edge case |
 
-## HANDOFF section 6: what the documentation contradicts or updates
+## Corrections to earlier project assumptions
 
-HANDOFF is a local working file, not in this repository; items refer to its
-section 6.
+Earlier planning notes assumed the following; the pages now say otherwise or add detail.
 
-| HANDOFF statement | What the pages say now |
+| Earlier assumption | What the pages say now |
 | --- | --- |
-| 6.1: in the OS table for 136, CloudLinux 10 is experimental and Ubuntu 22.04 unavailable | The table (updated 2026-09-25) marks CloudLinux 10 **supported** on 134 and 136; Ubuntu 22.04 is supported on 134 tiers and not available on 136 ([support: supported OS][sup-os]). |
-| 6.1: plans are built around cPanel & WHM 136 | The release table gives 136 an approximate end of life of August 2026; 134 is the current LTS (approximately to June 2027) and 138 is the newest release listed ([Product versions][kb-release]). |
-| Task brief: the current cPanel theme is Jupiter | Meridian is a new theme that can be set as default; cPanel support says common third-party plugins do not appear in it yet ([Meridian][meridian-welcome], [support][sup-meridian-plugins]). |
-| 6.2: account and domain data in `/var/cpanel/userdata/` (from memory) | Confirmed to exist, but the documented interface is WHM API 1; the YAML is not to be edited and its schema is not published (section 1). |
-| 6.2: client root actions through AdminBin (from memory) | Confirmed; the documented preferred form is a Perl admin module (section 4). |
-| 6.1: cPanel plugin guide link built from a relative path | The link <https://api.docs.cpanel.net/guides/guide-to-cpanel-plugins> works. |
+| In the OS table for 136, CloudLinux 10 is experimental and Ubuntu 22.04 unavailable | The table (updated 2026-09-25) marks CloudLinux 10 **supported** on 134 and 136; Ubuntu 22.04 is supported on 134 tiers and not available on 136 ([support: supported OS][sup-os]). |
+| Plans are built around cPanel & WHM 136 | The release table gives 136 an approximate end of life of August 2026; 134 is the current LTS (approximately to June 2027) and 138 is the newest release listed ([Product versions][kb-release]). |
+| The current cPanel theme is Jupiter | Meridian is a new theme that can be set as default; cPanel support says common third-party plugins do not appear in it yet ([Meridian][meridian-welcome], [support][sup-meridian-plugins]). |
+| Account and domain data in `/var/cpanel/userdata/` (from memory) | Confirmed to exist, but the documented interface is WHM API 1; the YAML is not to be edited and its schema is not published (section 1). |
+| Client root actions through AdminBin (from memory) | Confirmed; the documented preferred form is a Perl admin module (section 4). |
+| The cPanel plugin guide link built from a relative path | The link <https://api.docs.cpanel.net/guides/guide-to-cpanel-plugins> works. |
 
-No statement in HANDOFF 6.1 about hooks, AppConfig or ea-nginx was
+No earlier assumption about hooks, AppConfig or ea-nginx was
 contradicted.
 
 <!-- Links -->
