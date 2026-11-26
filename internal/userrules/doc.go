@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package userrules validates nginx rules written by hosting clients for
 // their own domains (T-7, T-8, N-6, Q-6).
 //
