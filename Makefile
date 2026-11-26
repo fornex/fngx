@@ -1,8 +1,16 @@
 PKG      := github.com/fornex/fngx
 CMD      := $(notdir $(wildcard cmd/*))
-VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+ifneq ($(words $(CMD)),1)
+$(error expected exactly one directory in cmd/, found: $(CMD))
+endif
+
+# Without a tag the version stays "dev"; the commit is recorded separately.
+# Overrides must not contain spaces.
+VERSION  ?= $(shell git describe --tags --dirty 2>/dev/null || echo dev)
 COMMIT   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-LDFLAGS  := -s -w -X $(PKG)/internal/product.Version=$(VERSION) -X $(PKG)/internal/product.Commit=$(COMMIT)
+VERSION  := $(VERSION)
+COMMIT   := $(COMMIT)
+LDFLAGS  :=-s -w -X $(PKG)/internal/product.Version=$(VERSION) -X $(PKG)/internal/product.Commit=$(COMMIT)
 
 .PHONY: all build build-linux test lint fmt clean
 
@@ -26,4 +34,4 @@ fmt:
 	gofmt -w .
 
 clean:
-	rm -rf bin
+	rm -rf bin coverage.out

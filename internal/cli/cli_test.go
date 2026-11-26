@@ -21,6 +21,8 @@ func TestRun(t *testing.T) {
 		{name: "no args prints usage to stderr", args: nil, wantCode: ExitUsage, wantErr: "Usage:", wantNoOut: true},
 		{name: "help", args: []string{"help"}, wantCode: ExitOK, wantOut: "Usage:", wantNoErr: true},
 		{name: "help flag", args: []string{"--help"}, wantCode: ExitOK, wantOut: "version", wantNoErr: true},
+		{name: "help short flag", args: []string{"-h"}, wantCode: ExitOK, wantOut: "Usage:", wantNoErr: true},
+		{name: "version long flag", args: []string{"--version"}, wantCode: ExitOK, wantOut: product.Name + " " + product.Version, wantNoErr: true},
 		{name: "help with extra args", args: []string{"help", "x"}, wantCode: ExitUsage, wantErr: "unexpected arguments", wantNoOut: true},
 		{name: "version", args: []string{"version"}, wantCode: ExitOK, wantOut: product.Name + " " + product.Version, wantNoErr: true},
 		{name: "version flag", args: []string{"-v"}, wantCode: ExitOK, wantOut: "commit " + product.Commit, wantNoErr: true},
@@ -47,6 +49,18 @@ func TestRun(t *testing.T) {
 				t.Errorf("stderr = %q, want empty", errOut.String())
 			}
 		})
+	}
+}
+
+func TestHelpListsEveryCommand(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"help"}, &out, &errOut); code != ExitOK {
+		t.Fatalf("help exit code = %d, want %d", code, ExitOK)
+	}
+	for _, c := range commands() {
+		if !strings.Contains(out.String(), "  "+c.name+" ") {
+			t.Errorf("help output does not list command %q:\n%s", c.name, out.String())
+		}
 	}
 }
 

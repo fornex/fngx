@@ -13,27 +13,28 @@ cPanel/WHM server. Each domain can run in one of three modes:
 | Mode | Static files (images, CSS, JS) | PHP and other dynamic pages | `.htaccess` |
 | --- | --- | --- | --- |
 | **proxy** | Apache | Apache | works |
-| **hybrid** | nginx | Apache | partly ignored |
+| **hybrid** | nginx | Apache | ignored for static files |
 | **nginx** | nginx | PHP-FPM | ignored |
 
-- **proxy** is the safest: nginx passes every request to Apache, so
+- **proxy** changes the least: nginx passes every request to Apache, so
   your sites behave as before.
-- **hybrid** is faster: nginx serves static files itself.
-- **nginx** is the fastest: Apache is not used at all. Rewrite rules
-  come from an application template (WordPress, Joomla, and others),
-  not from `.htaccess`.
+- **hybrid**: nginx serves static files itself. `.htaccess` rules
+  (deny, password protection, rewrites) do not apply to those files.
+- **nginx**: Apache is not used for the domain. PHP runs in PHP-FPM.
+  Rewrite rules come from an application template (WordPress, Joomla,
+  and others), not from `.htaccess`.
 
 Planned features: PHP version per domain, ModSecurity 3 with the OWASP
 Core Rule Set, request limits and blocking, proxy and FastCGI caching,
 WHM and cPanel interfaces, a command-line tool, and automatic migration
 from Cpnginx.
 
-## Requirements
+## Planned targets
 
 - cPanel & WHM with EasyApache 4
 - AlmaLinux, CloudLinux, or Ubuntu on x86_64
 
-Exact supported versions will be listed with the first release.
+Tested versions will be listed with the first release.
 
 ## Building from source
 

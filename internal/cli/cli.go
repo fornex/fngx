@@ -60,7 +60,7 @@ func usage(w io.Writer) {
 
 func runHelp(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
-		fmt.Fprintf(stderr, "%s help: unexpected arguments\n", product.Name)
+		fmt.Fprintf(stderr, "%s help: unexpected arguments; run '%s help'\n", product.Name, product.Name)
 		return ExitUsage
 	}
 	usage(stdout)
@@ -69,7 +69,7 @@ func runHelp(args []string, stdout, stderr io.Writer) int {
 
 func runVersion(args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
-		fmt.Fprintf(stderr, "%s version: unexpected arguments\n", product.Name)
+		fmt.Fprintf(stderr, "%s version: unexpected arguments; run '%s help'\n", product.Name, product.Name)
 		return ExitUsage
 	}
 	fmt.Fprintf(stdout, "%s %s (commit %s)\n", product.Name, product.Version, product.Commit)

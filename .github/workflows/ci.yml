@@ -10,13 +10,16 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -25,14 +28,17 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        run: go test -race -count=1 ./...
       - name: Build for Linux x86_64
         run: make build-linux
 
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
