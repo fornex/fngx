@@ -27,7 +27,13 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: Vet
         run: go vet ./...
+      # The apply integration tests run the real "nginx -t" and reload.
+      - name: Install nginx
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends nginx
       - name: Test
+        env:
+          NGINX_TEST_REQUIRED: "1"
+          NGINX_TEST_BINARY: /usr/sbin/nginx
         run: go test -race -count=1 ./...
       - name: Build for Linux x86_64
         run: make build-linux
