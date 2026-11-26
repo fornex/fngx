@@ -5,6 +5,7 @@ package cms
 import (
 	"errors"
 	"fmt"
+	"path"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -13,7 +14,7 @@ import (
 // maxOps bounds the file system operations (openat, fstatat) one
 // detection may perform. The rules need far fewer (see
 // TestOpsBudget_N1); the limit is a backstop, not a tuning knob.
-const maxOps = 96
+const maxOps = 128
 
 // maxIgnored bounds Result.Ignored.
 const maxIgnored = 32
@@ -70,7 +71,7 @@ type statEntry struct {
 // descriptors. It is not safe for concurrent use.
 type tree struct {
 	rootFD  int
-	rootUID uint32
+	owner   uint32              // uid of the site owner; every directory and read file must have it
 	dirs    map[string]dirEntry // relative directory path -> descriptor
 	stats   map[string]statEntry
 	reads   map[string][]byte // nil value: the read was refused
@@ -81,26 +82,38 @@ type tree struct {
 
 const (
 	dirFlags  = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_NOCTTY
-	fileFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_NOCTTY
+	fileFlags = unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_NOCTTY | noatime
 )
 
 // openTree opens the document root. The final path component must be a
-// real directory, not a symlink; the components above it are resolved
-// normally and must be trusted by the caller (see Detect and DetectUnder).
-func openTree(docroot string) (*tree, error) {
+// real directory owned by owner, not a symlink; the components above it
+// are resolved normally and must be trusted by the caller (see Detect
+// and DetectUnder).
+func openTree(docroot string, owner uint32) (*tree, error) {
 	if docroot == "" || docroot[0] != '/' {
 		return nil, fmt.Errorf("document root %q: must be an absolute path", docroot)
+	}
+	// A trailing "/" or "/." makes the kernel resolve the last name as
+	// a directory and follow a symlink there despite O_NOFOLLOW, so
+	// only clean paths are accepted.
+	if path.Clean(docroot) != docroot || docroot == "/" {
+		return nil, fmt.Errorf("document root %q: must be a clean path (no trailing slash, \".\" or \"..\")", docroot)
 	}
 	fd, err := openRetry(unix.AT_FDCWD, docroot, dirFlags)
 	if err != nil {
 		return nil, fmt.Errorf("document root %q: %w", docroot, describe(err))
 	}
-	return newTree(fd)
+	if err := checkDir(fd, owner); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("document root %q: %w", docroot, err)
+	}
+	return newTree(fd, owner), nil
 }
 
 // openTreeUnder opens base, which the caller trusts, and then walks rel
-// one component at a time without following symlinks.
-func openTreeUnder(base, rel string) (*tree, error) {
+// one component at a time without following symlinks. Every component
+// of rel must be a directory owned by owner.
+func openTreeUnder(base, rel string, owner uint32) (*tree, error) {
 	if base == "" || base[0] != '/' {
 		return nil, fmt.Errorf("base %q: must be an absolute path", base)
 	}
@@ -112,31 +125,55 @@ func openTreeUnder(base, rel string) (*tree, error) {
 	if err != nil {
 		return nil, fmt.Errorf("base %q: %w", base, describe(err))
 	}
+	if err := checkDir(fd, owner); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("base %q: %w", base, err)
+	}
 	for i, p := range parts {
 		next, err := openRetry(fd, p, dirFlags)
 		_ = unix.Close(fd)
+		if err == nil {
+			if err = checkDir(next, owner); err != nil {
+				_ = unix.Close(next)
+			}
+		}
 		if err != nil {
 			return nil, fmt.Errorf("document root %q: component %q: %w", rel, strings.Join(parts[:i+1], "/"), describe(err))
 		}
 		fd = next
 	}
-	return newTree(fd)
+	return newTree(fd, owner), nil
 }
 
-func newTree(fd int) (*tree, error) {
+var (
+	errOwner   = errors.New("owner differs from the site owner")
+	errChanged = errors.New("changed while being checked, not read")
+)
+
+// checkDir verifies that fd is a directory owned by owner.
+func checkDir(fd int, owner uint32) error {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("document root: %w", err)
+		return err
 	}
+	if kindOf(st.Mode) != kindDir {
+		return errors.New("not a directory")
+	}
+	if st.Uid != owner {
+		return errOwner
+	}
+	return nil
+}
+
+func newTree(fd int, owner uint32) *tree {
 	return &tree{
-		rootFD:  fd,
-		rootUID: st.Uid,
-		dirs:    map[string]dirEntry{"": {fd: fd}},
-		stats:   map[string]statEntry{},
-		reads:   map[string][]byte{},
-		seen:    map[string]bool{},
-	}, nil
+		rootFD: fd,
+		owner:  owner,
+		dirs:   map[string]dirEntry{"": {fd: fd}},
+		stats:  map[string]statEntry{},
+		reads:  map[string][]byte{},
+		seen:   map[string]bool{},
+	}
 }
 
 func (t *tree) close() {
@@ -179,7 +216,10 @@ func (t *tree) ignore(path, reason string) {
 }
 
 // dir returns a descriptor for the relative directory path, opening each
-// component with O_NOFOLLOW relative to its parent.
+// component with O_NOFOLLOW relative to its parent. A directory not
+// owned by the site owner is not entered: a client could otherwise move
+// another user's directory (one it may write to but not read) into its
+// tree and use detection as an oracle on that user's files.
 func (t *tree) dir(rel string) (int, error) {
 	if d, ok := t.dirs[rel]; ok {
 		return d.fd, d.err
@@ -197,9 +237,27 @@ func (t *tree) dir(rel string) (int, error) {
 		return -1, err
 	}
 	fd, err := openRetry(pfd, name, dirFlags)
+	if err == nil {
+		if err = t.spend(); err == nil {
+			err = checkDir(fd, t.owner)
+		}
+		if err != nil {
+			_ = unix.Close(fd)
+		}
+	}
 	if err != nil {
 		t.dirs[rel] = dirEntry{fd: -1, err: err}
-		if !isAbsent(err) {
+		switch {
+		case errors.Is(err, unix.ELOOP):
+			t.ignore(rel, describe(err).Error())
+		case errors.Is(err, unix.ENOTDIR):
+			// Linux reports a symlink as ELOOP, other systems may
+			// say ENOTDIR; tell a symlink from a plain file.
+			var st unix.Stat_t
+			if t.spend() == nil && fstatatRetry(pfd, name, &st) == nil && kindOf(st.Mode) == kindSymlink {
+				t.ignore(rel, describe(unix.ELOOP).Error())
+			}
+		case !isAbsent(err):
 			t.ignore(rel, describe(err).Error())
 		}
 		return -1, err
@@ -280,8 +338,8 @@ func (t *tree) readUncached(rel string, limit int) []byte {
 	if pre.k != kindFile {
 		return nil
 	}
-	if pre.st.Uid != t.rootUID {
-		t.ignore(rel, "owner differs from the document root owner, not read")
+	if pre.st.Uid != t.owner {
+		t.ignore(rel, errOwner.Error()+", not read")
 		return nil
 	}
 	parent, name := "", rel
@@ -292,25 +350,27 @@ func (t *tree) readUncached(rel string, limit int) []byte {
 	if err != nil {
 		return nil
 	}
-	if err := t.spend(); err != nil {
-		t.ignore(rel, err.Error())
+	// Two operations: on Linux an O_PATH open and the reopen.
+	if t.ops+2 > maxOps {
+		t.ignore(rel, errBudget.Error())
 		return nil
 	}
-	fd, err := openRetry(pfd, name, fileFlags)
+	t.ops += 2
+	fd, err := openRegular(pfd, name, func(st *unix.Stat_t) error {
+		if kindOf(st.Mode) != kindFile || st.Dev != pre.st.Dev || st.Ino != pre.st.Ino || st.Uid != t.owner {
+			return errChanged
+		}
+		return nil
+	})
 	if err != nil {
-		t.ignore(rel, "open: "+describe(err).Error())
+		if errors.Is(err, errChanged) {
+			t.ignore(rel, err.Error())
+		} else {
+			t.ignore(rel, "open: "+describe(err).Error())
+		}
 		return nil
 	}
 	defer func() { _ = unix.Close(fd) }()
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		t.ignore(rel, "fstat: "+err.Error())
-		return nil
-	}
-	if kindOf(st.Mode) != kindFile || st.Dev != pre.st.Dev || st.Ino != pre.st.Ino || st.Uid != t.rootUID {
-		t.ignore(rel, "changed while being checked, not read")
-		return nil
-	}
 	buf := make([]byte, limit)
 	n := 0
 	for n < limit {
@@ -369,4 +429,13 @@ func fstatatRetry(dirfd int, name string, st *unix.Stat_t) error {
 			return err
 		}
 	}
+}
+
+// fstatCheck runs check on the metadata of an open descriptor.
+func fstatCheck(fd int, check func(*unix.Stat_t) error) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	return check(&st)
 }

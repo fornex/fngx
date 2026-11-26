@@ -19,7 +19,7 @@ import (
 
 func detect(t *testing.T, root string) Result {
 	t.Helper()
-	r, err := Detect(root)
+	r, err := Detect(root, me)
 	if err != nil {
 		t.Fatalf("Detect(%q): %v", root, err)
 	}
@@ -117,7 +117,7 @@ func TestDetect_T10_StrongerWins(t *testing.T) {
 	// so the content checks do not run and index.html is not read.
 	root := fixtureDir(t, "wordpress")
 	build(t, root, fx{"index.html": spaIndex})
-	tr, err := openTree(root)
+	tr, err := openTree(root, me)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,15 @@ func TestDetect_N6_SymlinkedConfigIsOnlySupporting(t *testing.T) {
 	if err := os.Symlink("/etc/passwd", p); err != nil {
 		t.Fatal(err)
 	}
-	r := detect(t, root)
+	tr, err := openTree(root, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.close()
+	r := tr.detect()
+	if len(tr.reads) != 0 {
+		t.Errorf("files read: %v, want none", tr.reads)
+	}
 	c, ok := r.Suggestion()
 	if !ok || c.App != WordPress {
 		t.Fatalf("Suggestion = %+v, %v", c, ok)
@@ -250,8 +258,10 @@ func TestDetect_N6_SymlinkedDirectory(t *testing.T) {
 	if len(r.Candidates) != 0 {
 		t.Errorf("candidates = %+v, want none", r.Candidates)
 	}
-	if !hasIgnored(r, "wp-includes") {
-		t.Errorf("ignored = %+v, want wp-includes", r.Ignored)
+	for _, p := range []string{"wp-includes", "core/lib"} {
+		if !hasIgnored(r, p) {
+			t.Errorf("ignored = %+v, want %s", r.Ignored, p)
+		}
 	}
 }
 
@@ -303,10 +313,14 @@ func TestDetect_N6_DocrootIsSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Detect(link); err == nil {
-		t.Error("Detect followed a symlinked document root")
+	// A trailing "/" or "/." makes the kernel follow the final symlink
+	// despite O_NOFOLLOW; such paths are refused outright.
+	for _, p := range []string{link, link + "/", link + "/.", link + "//", link + "/../public_html", target + "/"} {
+		if _, err := Detect(p, me); err == nil {
+			t.Errorf("Detect(%q) succeeded: followed a symlink or accepted an unclean path", p)
+		}
 	}
-	if _, err := Detect(target); err != nil {
+	if _, err := Detect(target, me); err != nil {
 		t.Errorf("Detect(target): %v", err)
 	}
 }
@@ -317,7 +331,7 @@ func TestDetect_BadDocroot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"", "relative/dir", file, filepath.Join(file, "x"), "/nonexistent-" + t.Name()} {
-		if _, err := Detect(p); err == nil {
+		if _, err := Detect(p, me); err == nil {
 			t.Errorf("Detect(%q) succeeded", p)
 		}
 	}
@@ -336,7 +350,7 @@ func TestDetectUnder_N6(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r, err := DetectUnder(home, "public_html/blog")
+	r, err := DetectUnder(home, "public_html/blog", me)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,14 +358,14 @@ func TestDetectUnder_N6(t *testing.T) {
 		t.Errorf("Suggestion = %+v, %v; want WordPress", c, ok)
 	}
 	for _, rel := range []string{"public_html/evil", "www/blog", "public_html/../public_html/blog", "/public_html", "public_html//blog", "./public_html"} {
-		if _, err := DetectUnder(home, rel); err == nil {
+		if _, err := DetectUnder(home, rel, me); err == nil {
 			t.Errorf("DetectUnder(%q) succeeded", rel)
 		}
 	}
-	if _, err := DetectUnder("relative", "x"); err == nil {
+	if _, err := DetectUnder("relative", "x", me); err == nil {
 		t.Error("DetectUnder accepted a relative base")
 	}
-	if r, err := DetectUnder(filepath.Join(home, "public_html", "blog"), ""); err != nil || len(r.Candidates) == 0 {
+	if r, err := DetectUnder(filepath.Join(home, "public_html", "blog"), "", me); err != nil || len(r.Candidates) == 0 {
 		t.Errorf("DetectUnder with empty rel: %+v, %v", r, err)
 	}
 }
@@ -368,7 +382,7 @@ func TestDetect_N6_FIFO(t *testing.T) {
 	}
 	done := make(chan Result, 1)
 	go func() {
-		r, err := Detect(root)
+		r, err := Detect(root, me)
 		if err != nil {
 			t.Error(err)
 		}
@@ -394,7 +408,7 @@ func TestDetect_N6_FIFOSwappedAfterStat(t *testing.T) {
 	// at open time. The open must not block and the read must be refused.
 	root := t.TempDir()
 	build(t, root, fx{"index.html": spaIndex})
-	tr, err := openTree(root)
+	tr, err := openTree(root, me)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +440,7 @@ func TestDetect_N6_FileSwappedAfterStat(t *testing.T) {
 	// another file) replaces the marker between fstatat and open.
 	root := t.TempDir()
 	build(t, root, fx{"index.html": "<html></html>", "other.html": spaIndex})
-	tr, err := openTree(root)
+	tr, err := openTree(root, me)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +462,7 @@ func TestDetect_N6_SymlinkSwappedAfterStat(t *testing.T) {
 	build(t, outside, fx{"spa.html": spaIndex})
 	root := t.TempDir()
 	build(t, root, fx{"index.html": "<html></html>"})
-	tr, err := openTree(root)
+	tr, err := openTree(root, me)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,12 +484,12 @@ func TestDetect_N6_OwnerMismatchNotRead(t *testing.T) {
 	// A hard link to a root-owned or another user's file has that file's
 	// owner. Simulated by pretending the document root has another owner.
 	root := fixtureDir(t, "laravel-public")
-	tr, err := openTree(root)
+	tr, err := openTree(root, me)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer tr.close()
-	tr.rootUID++
+	tr.owner++
 	r := tr.detect()
 	if len(r.Candidates) != 0 {
 		t.Errorf("candidates = %+v, want none", r.Candidates)
@@ -548,15 +562,16 @@ func TestDetect_PermissionErrors(t *testing.T) {
 	}
 
 	chmod(".", 0)
-	if _, err := Detect(root); err == nil {
+	if _, err := Detect(root, me); err == nil {
 		t.Error("Detect opened an unreadable document root")
 	}
 }
 
 func TestOpsBudget_N1(t *testing.T) {
 	// Static bound: every distinct marker path is stat'ed at most once,
-	// every distinct parent directory opened at most once, and at most
-	// one open per content check.
+	// every distinct parent directory opened and fstat'ed at most once
+	// (plus one fstatat when the open fails with ENOTDIR), and two opens
+	// per content check.
 	paths, dirs, reads := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, s := range signatures {
 		for _, m := range append(append([]marker{}, s.required...), s.supporting...) {
@@ -569,8 +584,8 @@ func TestOpsBudget_N1(t *testing.T) {
 			reads[s.content.path] = true
 		}
 	}
-	bound := len(paths) + len(dirs) + len(reads)
-	t.Logf("static bound: %d stats + %d directory opens + %d reads = %d (maxOps %d)",
+	bound := len(paths) + 3*len(dirs) + 2*len(reads)
+	t.Logf("static bound: %d stats + 3 x %d directories + 2 x %d reads = %d (maxOps %d)",
 		len(paths), len(dirs), len(reads), bound, maxOps)
 	if bound > maxOps {
 		t.Fatalf("rules need up to %d operations, maxOps is %d", bound, maxOps)
@@ -582,7 +597,7 @@ func TestOpsBudget_N1(t *testing.T) {
 	for name, f := range map[string]fx{"empty": {}, "union": u, "wordpress": fixtures["wordpress"], "react-spa": fixtures["react-spa"]} {
 		root := t.TempDir()
 		build(t, root, f)
-		tr, err := openTree(root)
+		tr, err := openTree(root, me)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -597,7 +612,7 @@ func TestOpsBudget_N1(t *testing.T) {
 
 func TestBudgetExhausted(t *testing.T) {
 	root := fixtureDir(t, "wordpress")
-	tr, err := openTree(root)
+	tr, err := openTree(root, me)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,5 +665,104 @@ func TestConfidenceText(t *testing.T) {
 		if err != nil || string(b) != want {
 			t.Errorf("%d: %q, %v", c, b, err)
 		}
+	}
+}
+
+func TestDetect_N6_WrongOwner(t *testing.T) {
+	root := fixtureDir(t, "wordpress")
+	if _, err := Detect(root, me+1); err == nil {
+		t.Error("Detect accepted a document root owned by someone else")
+	}
+	if _, err := DetectUnder(filepath.Dir(root), filepath.Base(root), me+1); err == nil {
+		t.Error("DetectUnder accepted a base owned by someone else")
+	}
+}
+
+// TestDetect_N6_ForeignOwnedEntries uses real foreign-owned files and
+// directories, which needs root (the production identity).
+func TestDetect_N6_ForeignOwnedEntries(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to chown")
+	}
+	const other = 4242
+	chown := func(p string) {
+		t.Helper()
+		if err := os.Lchown(p, other, other); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A foreign-owned file (what a hard link to another user's or
+	// root's file looks like) is not read.
+	root := fixtureDir(t, "laravel-public")
+	chown(filepath.Join(root, "index.php"))
+	r := detect(t, root)
+	if len(r.Candidates) != 0 || !hasIgnored(r, "index.php") {
+		t.Errorf("foreign index.php: %+v", r)
+	}
+
+	// A foreign-owned directory (another user's directory moved into
+	// the client's tree) is not entered.
+	root = fixtureDir(t, "wordpress")
+	chown(filepath.Join(root, "wp-includes"))
+	r = detect(t, root)
+	for _, c := range r.Candidates {
+		if slices.Contains(c.Evidence, "wp-includes/version.php") {
+			t.Errorf("evidence from a foreign directory: %+v", c)
+		}
+	}
+	if !hasIgnored(r, "wp-includes") {
+		t.Errorf("ignored = %+v, want wp-includes", r.Ignored)
+	}
+
+	// The same through DetectUnder: a foreign component is refused.
+	home := t.TempDir()
+	build(t, home, fx{"public_html/stolen/index.php": laravelIndex})
+	chown(filepath.Join(home, "public_html", "stolen"))
+	if _, err := DetectUnder(home, "public_html/stolen", me); err == nil {
+		t.Error("DetectUnder entered a foreign-owned directory")
+	}
+}
+
+func TestDetect_N6_DeviceSwappedAfterStat(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to mknod")
+	}
+	root := t.TempDir()
+	build(t, root, fx{"index.html": spaIndex})
+	tr, err := openTree(root, me)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.close()
+	tr.stat("index.html")
+	p := filepath.Join(root, "index.html")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mknod(p, unix.S_IFCHR|0o600, int(unix.Mkdev(1, 5))); err != nil { //nolint:gosec // 1:5 is /dev/zero, fits in int
+		t.Skipf("mknod: %v", err)
+	}
+	if b := tr.readPrefix("index.html", indexHTMLLimit); b != nil {
+		t.Errorf("read %d bytes from a device", len(b))
+	}
+}
+
+func TestDetect_T10_LaravelVariants(t *testing.T) {
+	for name, index := range map[string]string{
+		// Laravel 5.0 to 5.4: no LARAVEL_START.
+		"5.0": "<?php\nrequire __DIR__.'/../bootstrap/autoload.php';\n$app = require_once __DIR__.'/../bootstrap/app.php';\n" +
+			"$request = Illuminate\\Http\\Request::capture();\n",
+		// Shared-hosting install with an edited path.
+		"edited": strings.ReplaceAll(laravelIndex, "/../bootstrap/", "/../laravel/bootstrap/"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			build(t, root, fx{"index.php": index})
+			c, ok := detect(t, root).Suggestion()
+			if !ok || c.App != Laravel || c.Variant != "public" {
+				t.Errorf("Suggestion = %+v, %v; want Laravel public", c, ok)
+			}
+		})
 	}
 }

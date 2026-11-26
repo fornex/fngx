@@ -79,14 +79,22 @@ func (r Result) Suggestion() (c Candidate, ok bool) {
 // Detect examines the document root and returns the applications found.
 // It never modifies anything.
 //
-// docroot must be absolute. Its last component must be a directory, not
-// a symlink. The components above it are resolved by the kernel and
-// therefore must not be controlled by the site owner: for a document
-// root inside a client's home directory use DetectUnder.
+// owner is the uid of the site owner, taken from the system user
+// database, not from the file system. The document root and every
+// directory entered must be owned by it, and only files owned by it are
+// read; anything else is skipped, so a client cannot make detection look
+// at another user's or root's files.
 //
-// The error is non-nil only when the document root cannot be opened.
-func Detect(docroot string) (Result, error) {
-	t, err := openTree(docroot)
+// docroot must be an absolute, clean path (no trailing slash, "." or
+// ".."). Its last component must be a directory, not a symlink. The
+// components above it are resolved by the kernel and therefore must not
+// be controlled by the site owner: for a document root inside a
+// client's home directory use DetectUnder.
+//
+// The error is non-nil only when the document root cannot be opened or
+// is not owned by owner.
+func Detect(docroot string, owner uint32) (Result, error) {
+	t, err := openTree(docroot, owner)
 	if err != nil {
 		return Result{}, err
 	}
@@ -94,13 +102,17 @@ func Detect(docroot string) (Result, error) {
 	return t.detect(), nil
 }
 
-// DetectUnder is Detect for base/rel, where base is trusted (for example
-// a home directory taken from the system user database) and rel is a
-// relative path controlled by the site owner (for example
-// "public_html/blog"). Every component of rel is opened without
-// following symlinks, so a client cannot point the scan elsewhere.
-func DetectUnder(base, rel string) (Result, error) {
-	t, err := openTreeUnder(base, rel)
+// DetectUnder is Detect for base/rel, where base is trusted (the home
+// directory from the system user database) and rel is a relative path
+// controlled by the site owner (for example "public_html/blog"). Every
+// component of rel is opened without following symlinks and must be a
+// directory owned by owner, so a client cannot point the scan elsewhere.
+//
+// If the client's document root is a symlink, the caller may resolve it
+// only within the home directory and must pass the result as rel;
+// a target outside the home directory must be refused, not scanned.
+func DetectUnder(base, rel string, owner uint32) (Result, error) {
+	t, err := openTreeUnder(base, rel, owner)
 	if err != nil {
 		return Result{}, err
 	}

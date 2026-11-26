@@ -38,7 +38,7 @@ func BenchmarkDetect_N1(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		for _, r := range roots {
-			if _, err := Detect(r); err != nil {
+			if _, err := Detect(r, me); err != nil {
 				b.Fatal(err)
 			}
 		}

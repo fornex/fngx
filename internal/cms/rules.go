@@ -176,12 +176,14 @@ var signatures = []signature{
 		// Document root = public/. The parent directory is outside the
 		// document root and is not examined, so the evidence is the
 		// front controller itself: laravel/laravel public/index.php
-		// defines LARAVEL_START and requires ../bootstrap/app.php
-		// (checked on branches 5.8, 8.x, 10.x and 12.x).
+		// requires bootstrap/app.php and uses Illuminate\Http\Request
+		// (5.0 to 12.x; LARAVEL_START since 5.5). Only the file name is
+		// matched, not "/../", because shared-hosting installs often
+		// edit the path (for example "/../laravel/bootstrap/app.php").
 		app: Laravel, variant: "public", template: TemplateLaravel,
 		required: []marker{file("index.php")},
 		content: &contentCheck{path: "index.php", limit: indexPHPLimit, groups: [][]string{
-			{"LARAVEL_START"}, {"/../bootstrap/app.php"},
+			{"bootstrap/app.php"}, {"LARAVEL_START", `Illuminate\Http\Request`},
 		}},
 		max: Medium,
 	},

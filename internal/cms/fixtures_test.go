@@ -14,6 +14,9 @@ import (
 // code is copied; the few content strings are the minimal markers the
 // rules look for.
 
+// me is the uid the tests run as: the owner of every fixture.
+var me = uint32(os.Getuid())
+
 // fx maps a relative path to file contents; a path ending in "/" is a
 // directory.
 type fx map[string]string
