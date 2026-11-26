@@ -230,8 +230,8 @@ if OUT="$("$NGINX" -c "$TMP/run.conf" 2>&1)"; then
 	NGINX_PID="$(cat "$TMP/run.pid" 2>/dev/null || true)"
 
 	# nginx -t does not bind sockets; check the QUIC listener really is a
-	# UDP socket on port 18443 (0x4813) in the kernel's table.
-	if grep -q -i ':4813 ' /proc/net/udp /proc/net/udp6 2>/dev/null; then
+	# UDP socket on port 18443 in the kernel's table (ports are hex there).
+	if grep -q -i ":$(printf '%04X' 18443) " /proc/net/udp /proc/net/udp6 2>/dev/null; then
 		pass "nginx listens on UDP port 18443 (QUIC)"
 	else
 		fail "no UDP socket on port 18443"
