@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package apply validates generated nginx configuration and makes it live
 // (A-4, A-5, A-6, T-9, N-3, N-4, N-5, N-6, N-9).
 //
