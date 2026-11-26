@@ -41,7 +41,7 @@ Options:
                          unless it has the sticky bit
   --keep-workdir         do not delete the build directory on success
   --skip-deps            do not install build dependencies
-  --with-pagespeed       also build the PageSpeed module (not supported, see docs)
+  --with-pagespeed       build the PageSpeed module (not implemented, see docs)
   -h, --help             show this help
 
 Environment: PRODUCT has the same meaning as --product.
@@ -86,9 +86,10 @@ fi
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "invalid --jobs value: $JOBS"
 
 if [ "$WITH_PAGESPEED" = 1 ]; then
-	die "--with-pagespeed is not supported: no way was found to build the We-Amp
-PageSpeed module against this nginx from source. See docs/build.md,
-section \"PageSpeed\". Build again without --with-pagespeed."
+	die "--with-pagespeed is not implemented in this script. Building the We-Amp
+PageSpeed module from source needs Bazel, clang >= 20 and about 7 GB of disk;
+a manual build was verified on AlmaLinux 9 only. See docs/build.md, section
+\"PageSpeed\". Build again without --with-pagespeed."
 fi
 
 if [ "$NGINX_VERSION" = "$NGINX_VERSION_DEFAULT" ]; then

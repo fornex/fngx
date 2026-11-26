@@ -36,8 +36,8 @@ build/nginx/run-in-container.sh almalinux:9
 `build.sh` options: `--nginx-version`, `--product`, `--jobs`, `--workdir`
 (parent of a new build directory; must be root-owned and not writable by
 others unless sticky),
-`--keep-workdir`, `--skip-deps`, `--with-pagespeed` (fails, see
-[PageSpeed](#pagespeed)). `build.sh --help` describes them.
+`--keep-workdir`, `--skip-deps`, `--with-pagespeed` (not implemented, fails;
+see [PageSpeed](#pagespeed)). `build.sh --help` describes them.
 
 No source code of nginx, OpenSSL, ModSecurity, OWASP CRS or PageSpeed is
 stored in this repository: it is downloaded at build time.
@@ -120,7 +120,7 @@ new `mktemp` directory (mode 0700, owned by root).
 
 | Component | Signing key (primary fingerprint) | Where the key is published |
 | --- | --- | --- |
-| nginx | Release managers' keys, e.g. Sergey Kandaurov `D6786CE303D9A9022998DC6CC8464D549AF75C0A` (signed 1.30.8 and 1.31.10); all five keys from the page are allowed | [nginx.org PGP keys](https://nginx.org/en/pgp_keys.html) |
+| nginx | Release managers' keys, e.g. Sergey Kandaurov `D6786CE303D9A9022998DC6CC8464D549AF75C0A` (signed 1.30.8 and 1.31.10); four of the five keys from the page are allowed (one expired in 2016) | [nginx.org PGP keys](https://nginx.org/en/pgp_keys.html) |
 | OpenSSL | `B146647E45A7B33947AB226B2A2C87D161692D40` (signing subkey `C46ED3F2CBEFDA1FDAADA44264ED7B1DCCE71CB2`, expires 26 May 2027) | [openssl-library.org/source](https://openssl-library.org/source/), `pubkeys.asc` |
 | libmodsecurity, connector | `0B2BA1924065B44691202A2AD286E022149F0F6E` | [OWASP ModSecurity CVE page](https://github.com/OWASP/www-project-modsecurity/blob/main/tab_cves.md); the key itself was fetched from keys.openpgp.org and keyserver.ubuntu.com (both identical) |
 
@@ -304,19 +304,19 @@ installation.
 
 ## Results per OS
 
-CI run [45872584039](https://github.com/fornex/fngx/actions/runs/45872584039)
-on commit `e46357d`, GitHub-hosted `ubuntu-24.04` runner, x86_64,
+CI run [45875748355](https://github.com/fornex/fngx/actions/runs/45875748355)
+on commit `835c60c`, GitHub-hosted `ubuntu-24.04` runner, x86_64,
 4 CPUs, 15 GB RAM, one container per OS. All five builds passed every smoke
 test. Times are from the build log: "deps" is the package installation,
 "build" is download + verification + compile + install of all components.
 
 | OS (image) | Compiler | PCRE2 / libxml2 / YAJL (system) | Deps | Build | Total job step | Result |
 | --- | --- | --- | --- | --- | --- | --- |
-| AlmaLinux 8.10 (`almalinux:8`) | GCC 8.5.0 | 10.32 / 2.9.7 / 2.1.0 | 29 s | 133 s | 164 s | pass |
-| AlmaLinux 9.9 (`almalinux:9`) | GCC 11.5.0 | 10.40 / 2.9.13 / 2.1.0 | 24 s | 174 s | 204 s | pass |
-| AlmaLinux 10.3 (`almalinux:10`) | GCC 14.4.1 | 10.44 / 2.12.5 / none | 11 s | 148 s | 160 s | pass, JSON bodies not inspected (no YAJL) |
-| Ubuntu 22.04 (`ubuntu:22.04`) | GCC 11.4.0 | 10.39 / 2.9.13 / 2.1.0 | 10 s | 139 s | 151 s | pass |
-| Ubuntu 24.04 (`ubuntu:24.04`) | GCC 13.3.0 | 10.42 / 2.9.14 / 2.1.0 | 12 s | 138 s | 152 s | pass |
+| AlmaLinux 8.10 (`almalinux:8`) | GCC 8.5.0 | 10.32 / 2.9.7 / 2.1.0 | 30 s | 138 s | 170 s | pass (25 checks) |
+| AlmaLinux 9.9 (`almalinux:9`) | GCC 11.5.0 | 10.40 / 2.9.13 / 2.1.0 | 21 s | 148 s | 175 s | pass (25 checks) |
+| AlmaLinux 10.3 (`almalinux:10`) | GCC 14.4.1 | 10.44 / 2.12.5 / none | 9 s | 145 s | 157 s | pass (24 checks); JSON bodies not inspected (no YAJL) |
+| Ubuntu 22.04 (`ubuntu:22.04`) | GCC 11.4.0 | 10.39 / 2.9.13 / 2.1.0 | 17 s | 135 s | 155 s | pass (25 checks) |
+| Ubuntu 24.04 (`ubuntu:24.04`) | GCC 13.3.0 | 10.42 / 2.9.14 / 2.1.0 | 19 s | 161 s | 185 s | pass (25 checks) |
 | CloudLinux 8, 9, 10 | — | — | — | — | — | **not tested**: CloudLinux images are not freely available; must be checked on a real server |
 
 Component versions are the same on every OS: nginx 1.30.8, OpenSSL 3.5.9
@@ -336,6 +336,11 @@ configure arguments: --prefix=/opt/fngx/nginx --sbin-path=/opt/fngx/nginx/sbin/n
 Problems found and fixed during the work:
 
 - **AlmaLinux 10: no YAJL.** See [YAJL on EL10](#yajl-on-el10).
+- **Independent review** found that OpenSSL's compiled-in configuration
+  path pointed into the deleted build directory, that `--workdir` could
+  delete the directory it was given, and that the archive path check could
+  pass under `pipefail`. All three are fixed (see above); the CI run in the
+  table includes the fixes.
 - **EL9 images ship `curl-minimal`**, which conflicts with the `curl`
   package; `build.sh` asks dnf for `/usr/bin/curl` instead.
 - **TLS handshake failures to nginx.org** (curl exit 35) happened from a
@@ -352,7 +357,66 @@ are not representative of a server.
 
 ## PageSpeed
 
-PAGESPEED_PLACEHOLDER
+PageSpeed is an optional build flag and not part of acceptance (SPEC
+section 8). `build.sh --with-pagespeed` currently **fails** with a message
+pointing here: building the module is possible, but it is not integrated
+into `build.sh`.
+
+### What was tried (26 November 2026, time-boxed)
+
+Source: We-Amp [mod_pagespeed](https://github.com/We-Amp/mod_pagespeed),
+release [module-v2.10.0](https://github.com/We-Amp/mod_pagespeed/releases/tag/module-v2.10.0),
+Apache-2.0. One attempt in an `almalinux:9` x86_64 container on a
+workstation (Docker, Rosetta emulation, 14 CPUs, 7.75 GiB RAM for Docker).
+
+1. **Prebuilt module** (`ngx_pagespeed-2.10.0-linux-x86_64.tar.gz`): does
+   not load into our nginx:
+   `module "...ngx_pagespeed_module.so" version 1030007 instead of 1030008`.
+   Its module signature equals ours (both use `--with-compat`); only the
+   exact-version check fails, as the We-Amp
+   [nginx guide](https://github.com/We-Amp/mod_pagespeed/blob/master/docs/install-nginx.md)
+   says ("the exact nginx version they were built against"). The tarball's
+   README says it targets nginx 1.30.3 while the file reports 1.30.7.
+2. **Build from source — worked.** Steps:
+   - Downloaded the source tarball `mod_pagespeed-2.10.0.tar.gz` (463 MB,
+     includes vendored Bazel dependencies) and verified it against the
+     release's `SHA256SUMS`, whose signature is valid for the release key
+     `411DEFDB571351D2B25AEFCC9C02B5BDCCE75313` (`RELEASE-SIGNING-KEY.asc`
+     in the repository).
+   - Installed Bazel 8.8.1 (the version in `.bazelversion`) from
+     [its GitHub release](https://github.com/bazelbuild/bazel/releases/tag/8.8.1),
+     checked against its `.sha256` and signature (key
+     `71A1D0EFCFEB6281FD0437C93D5919B448457EE0`, fetched from
+     keyserver.ubuntu.com because `bazel.build/bazel-release.pub.gpg`
+     returned 404).
+   - Installed from AlmaLinux 9.9 repositories only: clang/lld 22.1.8,
+     gcc-toolset-13 (13.3.1), nasm (CRB) and smaller tools: 73 packages,
+     257 MB download, 864 MB installed.
+   - Ran We-Amp's own EL9 recipe, `install/nginx/build_module_in_container.sh el9`
+     from the tarball, against vanilla nginx 1.30.8: Bazel builds the PSOL
+     archive (about 3,300 actions), then nginx `--add-dynamic-module`.
+   - Rebuilt the module with `make modules` against the nginx tree
+     configured by `build.sh` (same arguments plus
+     `--add-dynamic-module=<pagespeed>/pagespeed/nginx`): 154 s.
+   - Result: our nginx 1.30.8 loads the module together with ModSecurity,
+     `nginx -t` passes, and a request returns `X-Page-Speed: on`.
+
+Measured under emulation, not representative of a server: Bazel about 28
+minutes in total (906 s with 4 jobs, then 799 s with 7 jobs reusing the
+cache). Disk used: about 7 GB. The module is 78–81 MB and needs glibc 2.34
+and the system `libstdc++`.
+
+### Why it is not in `build.sh` yet
+
+- Only EL9 was tried. We-Amp's recipe has separate legs per distribution;
+  EL8, EL10 and Ubuntu 22.04/24.04 (clang 20 or later is required) were not
+  tested.
+- It adds Bazel, a second compiler toolchain, about 7 GB of disk and tens of
+  minutes of build on a production server, and needs rebuilding for every
+  nginx version.
+- Integrating it means pinning and verifying Bazel and the source tarball in
+  `versions.env` and running the recipe per OS in CI; this is a follow-up
+  if the customer wants PageSpeed (see [Open questions](#open-questions)).
 
 ## Licenses of downloaded components
 
@@ -370,7 +434,7 @@ server. A lawyer reviews licensing before publication (SPEC section 16).
 | Mbed TLS (bundled in the ModSecurity tarball) | Apache-2.0 OR GPL-2.0-or-later (`others/mbedtls/LICENSE`) |
 | ModSecurity-nginx connector | Apache-2.0 ([LICENSE](https://github.com/owasp-modsecurity/ModSecurity-nginx/blob/master/LICENSE)) |
 | OWASP CRS (installed separately) | Apache-2.0 ([LICENSE](https://github.com/coreruleset/coreruleset/blob/main/LICENSE)) |
-| PageSpeed by We-Amp (optional, not built) | Apache-2.0 ([LICENSE](https://github.com/We-Amp/mod_pagespeed/blob/master/LICENSE)) |
+| PageSpeed by We-Amp (optional, not built by `build.sh`) | Apache-2.0 ([LICENSE](https://github.com/We-Amp/mod_pagespeed/blob/master/LICENSE)) |
 
 Build dependencies installed from the OS repositories (compiler, PCRE2,
 zlib, libxml2, YAJL) keep their distribution licenses.
@@ -392,3 +456,7 @@ zlib, libxml2, YAJL) keep their distribution licenses.
    the limits listed under "Installation without breaking a running nginx".
 5. **Installed layout** (`/opt/<product>`, `/etc/<product>/nginx`, ...) and
    the module list are proposals of the developer and await confirmation.
+6. **PageSpeed.** A source build works on AlmaLinux 9 (see
+   [PageSpeed](#pagespeed)). Should it be integrated into `build.sh` for all
+   OSes, given its cost (Bazel, clang, about 7 GB of disk, a long build on
+   the server)?
