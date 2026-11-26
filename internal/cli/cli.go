@@ -27,6 +27,7 @@ func commands() []command {
 	return []command{
 		{name: "help", summary: "Show this help", run: runHelp},
 		{name: "version", summary: "Print version information", run: runVersion},
+		{name: "respdiff", summary: "Record and compare how domains answer (I-11)", run: runRespdiff},
 	}
 }
 
