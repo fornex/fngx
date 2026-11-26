@@ -30,7 +30,7 @@ Directive references:
     http2 on;
 {{- end}}
 {{- with .AltSvc}}
-    add_header Alt-Svc {{.}};
+    add_header Alt-Svc {{.}} always;
 {{- end}}
 {{- end}}
 {{- end}}

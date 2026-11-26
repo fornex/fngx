@@ -6,10 +6,15 @@ server {
     server_name example.com;
     root /home/alice/example.com;
     index index.php index.html index.htm;
-    disable_symlinks if_not_owner from=$document_root;
+    disable_symlinks if_not_owner;
 
-    location ~ /\.(?!well-known(?:/|$)) {
-        deny all;
+    # Hidden files (.htaccess, .user.ini, .git/...) except /.well-known/,
+    # which certificate validation needs (M-2). Checked at server level,
+    # before any location is chosen, so no location of an admin or client
+    # rule (including "^~" prefixes, which skip regex locations) can serve
+    # them. $uri is the decoded, normalized URI.
+    if ($uri ~ "/\.(?!well-known(?:/|$))") {
+        return 403;
     }
 
     location / {

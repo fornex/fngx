@@ -12,7 +12,16 @@ server {
     server_name{{range $.Names}} {{.}}{{end}};
 {{- template "tls" .}}
     root {{$.Root}};
-    disable_symlinks if_not_owner from=$document_root;
+    disable_symlinks if_not_owner;
+
+    # Hidden files (.htaccess, .user.ini, .git/...) except /.well-known/,
+    # which certificate validation needs (M-2). Checked at server level,
+    # before any location is chosen, so no location of an admin or client
+    # rule (including "^~" prefixes, which skip regex locations) can serve
+    # them. $uri is the decoded, normalized URI.
+    if ($uri ~ "/\.(?!well-known(?:/|$))") {
+        return 403;
+    }
 {{- template "includes" .}}
 
     location / {

@@ -8,6 +8,9 @@ location ~* \.png$ {
     expires 30d;
 }
 deny 203.0.113.0/24;
+location ^~ /app/ {
+    expires 1h;
+}
 ### domains/shop.example.org/http-include.conf
 location = /admin-http { return 200 "admin http\n"; }
 deny 198.51.100.7;
@@ -25,7 +28,7 @@ server {
     listen [2001:db8::10]:80;
     server_name shop.example.org;
     root /home/alice/shop.example.org;
-    disable_symlinks if_not_owner from=$document_root;
+    disable_symlinks if_not_owner;
     include domains/shop.example.org/http-rewrite.conf;
     include domains/shop.example.org/http-include.conf;
     include domains/shop.example.org/client.conf;
@@ -45,9 +48,9 @@ server {
     ssl_certificate /etc/ssl/test/shop.example.org.crt;
     ssl_certificate_key /etc/ssl/test/shop.example.org.key;
     http2 on;
-    add_header Alt-Svc 'h3=":443"; ma=86400';
+    add_header Alt-Svc 'h3=":443"; ma=86400' always;
     root /home/alice/shop.example.org;
-    disable_symlinks if_not_owner from=$document_root;
+    disable_symlinks if_not_owner;
     include domains/shop.example.org/https-rewrite.conf;
     include domains/shop.example.org/https-include.conf;
     include domains/shop.example.org/client.conf;

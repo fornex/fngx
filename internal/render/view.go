@@ -99,6 +99,8 @@ type MainData struct {
 	MimeTypes         Arg
 	Temp              *TempData
 	WorkerConnections int
+	WorkerNoFile      int // worker_rlimit_nofile: twice WorkerConnections
+	ClientMaxBodySize Arg
 	SSLProtocols      []Arg
 	// Defaults lists one default server per listening address: HTTP and
 	// HTTPS.
@@ -294,6 +296,8 @@ func buildMain(s *Server) *MainData {
 		ErrorLog:          mustArg("error log", s.ErrorLog),
 		MimeTypes:         mustArg("mime types", s.MimeTypes),
 		WorkerConnections: s.WorkerConnections,
+		WorkerNoFile:      2 * s.WorkerConnections,
+		ClientMaxBodySize: mustArg("client max body size", s.ClientMaxBodySize),
 	}
 	if s.User != "" {
 		m.User = argPtr(mustArg("user", s.User))

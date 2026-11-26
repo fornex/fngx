@@ -17,6 +17,7 @@ import (
 
 	"github.com/fornex/fngx/internal/apply"
 	"github.com/fornex/fngx/internal/model"
+	"github.com/fornex/fngx/internal/userrules"
 )
 
 func TestArg(t *testing.T) { // N-6
@@ -135,7 +136,7 @@ func FuzzDocRoot(f *testing.F) { // N-6
 			return
 		}
 		want := "    root " + root + ";\n"
-		vhost := string(u.Files[0].Data)
+		vhost := string(fileData(t, u, vhostPath(d.Name)))
 		if strings.Count(vhost, want) != 1 {
 			t.Fatalf("root %q not printed as one token:\n%s", root, vhost)
 		}
@@ -146,10 +147,50 @@ func FuzzDocRoot(f *testing.F) { // N-6
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.ReplaceAll(vhost, want, "    root /plain;\n") != string(u2.Files[0].Data) {
+		if strings.ReplaceAll(vhost, want, "    root /plain;\n") != string(fileData(t, u2, vhostPath(d.Name))) {
 			t.Fatalf("root %q changed more than the root line", root)
 		}
 	})
+}
+
+func fileData(t testing.TB, u apply.Unit, path string) []byte {
+	t.Helper()
+	for _, f := range u.Files {
+		if f.Path == path {
+			return f.Data
+		}
+	}
+	t.Fatalf("unit %s has no %s", u.ID, path)
+	return nil
+}
+
+func TestClientReservedLocation(t *testing.T) { // T-7, T-9
+	r := newRenderer(t)
+	e := goldenEnv()
+	v, err := userrules.New(userrules.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"location / { expires 1h; }", "location ^~ / { expires 1h; }"} {
+		rules, err := v.Validate([]byte(text))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s, d := e.baseServer(), e.domain("example.com", model.ModeNginx)
+		d.Client = rules
+		if _, err := r.Domain(&s, &d); err == nil || !strings.Contains(err.Error(), "defined by the template") {
+			t.Errorf("%q: got %v", text, err)
+		}
+	}
+	rules, err := v.Validate([]byte("location = / { expires 1h; }\nlocation /x/ { expires 1h; }"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, d := e.baseServer(), e.domain("example.com", model.ModeNginx)
+	d.Client = rules
+	if _, err := r.Domain(&s, &d); err != nil {
+		t.Errorf("specific locations refused: %v", err)
+	}
 }
 
 func TestCustomTemplates(t *testing.T) { // T-3
@@ -345,6 +386,11 @@ func TestServerValidate(t *testing.T) {
 		"apache zero":    func(s *Server) { s.Apache.HTTP = netip.AddrPort{} },
 		"connections":    func(s *Server) { s.WorkerConnections = 0 },
 		"app none":       func(s *Server) { s.AppTemplates = map[model.TemplateName]string{"none": ""} },
+		"apache on 80":   func(s *Server) { s.Apache.HTTP = netip.MustParseAddrPort("127.0.0.1:80") },
+		"apache on ded.": func(s *Server) { s.Apache.HTTPS = netip.AddrPortFrom(e.dedicated4, 443) },
+		"body size":      func(s *Server) { s.ClientMaxBodySize = "1gb" },
+		"body size 2":    func(s *Server) { s.ClientMaxBodySize = "" },
+		"body size 3":    func(s *Server) { s.ClientMaxBodySize = "m" },
 	}
 	for name, f := range bad {
 		s := e.baseServer()
@@ -357,6 +403,16 @@ func TestServerValidate(t *testing.T) {
 	if err := s.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	// Apache on port 80 of an address nginx does not listen on is fine.
+	s.Addresses = []netip.Addr{netip.MustParseAddr("203.0.113.5")}
+	s.Apache.HTTP = netip.MustParseAddrPort("127.0.0.1:80")
+	for _, v := range []string{"0", "512", "10k", "1M", "2g"} {
+		s.ClientMaxBodySize = v
+		if err := s.Validate(); err != nil {
+			t.Errorf("%s: %v", v, err)
+		}
+	}
+	s = e.baseServer()
 	d := e.domain("example.com", model.ModeProxy)
 	d.IPs = []netip.Addr{netip.MustParseAddr("192.0.2.99")}
 	if err := d.Validate(&s); err == nil {

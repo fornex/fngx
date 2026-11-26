@@ -42,6 +42,10 @@ type Server struct {
 	TempDir string
 	// WorkerConnections is the "worker_connections" value.
 	WorkerConnections int
+	// ClientMaxBodySize is the largest request body nginx accepts
+	// ("client_max_body_size", for example "1g"; "0" means no limit). The
+	// nginx default of 1m would break uploads that Apache accepts.
+	ClientMaxBodySize string
 
 	// Addresses are the shared addresses nginx listens on. Empty means
 	// all IPv4 addresses (and IPv6 with IPv6 set).
@@ -102,6 +106,9 @@ func DefaultServer() Server {
 		AccessLog:         "/var/log/" + product.Name + "/nginx/access.log",
 		MimeTypes:         "/etc/" + product.Name + "/nginx/mime.types",
 		WorkerConnections: 4096,
+		// Assumption: Apache 2.4.54 and later default LimitRequestBody to
+		// 1 GiB; to compare with cPanel's Apache on the test server.
+		ClientMaxBodySize: "1g",
 		HTTPPort:          80,
 		HTTPSPort:         443,
 		HTTP2:             true,
@@ -284,6 +291,7 @@ func (s *Server) Validate() error {
 	if s.WorkerConnections < 1 || s.WorkerConnections > 1<<20 {
 		add(fmt.Errorf("worker connections %d: out of range", s.WorkerConnections))
 	}
+	add(checkSize("client max body size", s.ClientMaxBodySize))
 	add(checkPort("http port", s.HTTPPort))
 	add(checkPort("https port", s.HTTPSPort))
 	if s.HTTPPort == s.HTTPSPort {
@@ -316,10 +324,15 @@ func (s *Server) Validate() error {
 	if a := s.Apache; a != nil {
 		if !a.HTTP.IsValid() || checkAddr("apache http", a.HTTP.Addr()) != nil || a.HTTP.Port() == 0 {
 			add(fmt.Errorf("apache http address %q: must be a specific address and port", a.HTTP))
+		} else {
+			add(s.checkNotListened("apache http", a.HTTP))
 		}
-		if a.HTTPS != (netip.AddrPort{}) &&
-			(!a.HTTPS.IsValid() || checkAddr("apache https", a.HTTPS.Addr()) != nil || a.HTTPS.Port() == 0) {
-			add(fmt.Errorf("apache https address %q: must be a specific address and port", a.HTTPS))
+		if a.HTTPS != (netip.AddrPort{}) {
+			if !a.HTTPS.IsValid() || checkAddr("apache https", a.HTTPS.Addr()) != nil || a.HTTPS.Port() == 0 {
+				add(fmt.Errorf("apache https address %q: must be a specific address and port", a.HTTPS))
+			} else {
+				add(s.checkNotListened("apache https", a.HTTPS))
+			}
 		}
 	}
 	if len(s.StaticExtensions) > maxExtensions {
@@ -328,13 +341,66 @@ func (s *Server) Validate() error {
 	for _, e := range s.StaticExtensions {
 		add(checkExtension(e))
 	}
-	for name, text := range s.AppTemplates {
+	names := make([]model.TemplateName, 0, len(s.AppTemplates))
+	for name := range s.AppTemplates {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		text := s.AppTemplates[name]
 		if err := name.Validate(); err != nil || name == model.TemplateNone {
 			add(fmt.Errorf("app template name %q: invalid", name))
 		}
 		add(checkAdminText("app template "+string(name), text))
 	}
 	return errors.Join(errs...)
+}
+
+// checkSize accepts an nginx size: digits with an optional k, m or g
+// suffix (https://nginx.org/en/docs/syntax.html).
+func checkSize(what, v string) error {
+	n := strings.TrimRight(v, "kKmMgG")
+	if len(v)-len(n) > 1 || n == "" || len(n) > 12 || strings.Trim(n, "0123456789") != "" {
+		return fmt.Errorf("%s %q: must be digits with an optional k, m or g suffix", what, v)
+	}
+	return nil
+}
+
+// checkNotListened refuses a backend address that nginx itself listens on:
+// nginx would fail to bind at start (which nginx -t does not catch) or pass
+// requests to itself.
+func (s *Server) checkNotListened(what string, ap netip.AddrPort) error {
+	p := int(ap.Port())
+	if p != s.HTTPPort && p != s.HTTPSPort {
+		return nil
+	}
+	if len(s.Addresses) == 0 || slices.Contains(s.Addresses, ap.Addr()) || slices.Contains(s.Dedicated, ap.Addr()) {
+		return fmt.Errorf("%s address %s: nginx listens there itself", what, ap)
+	}
+	return nil
+}
+
+// reservedLocations are locations every built-in template defines. A client
+// rule with the same location would make nginx -t fail with a duplicate
+// location, so it is refused here with a clear message (T-9 would refuse it
+// too, but only when the set is tested).
+var reservedLocations = [][]string{{"/"}, {"^~", "/"}}
+
+func checkClientRules(r *userrules.Rules) error {
+	if r == nil {
+		return nil
+	}
+	for _, d := range r.Directives {
+		if d.Name != "location" {
+			continue
+		}
+		for _, res := range reservedLocations {
+			if slices.Equal(d.Args, res) {
+				return fmt.Errorf("client rules: \"location %s\" is defined by the template; use a more specific location", strings.Join(d.Args, " "))
+			}
+		}
+	}
+	return nil
 }
 
 // Validate checks the domain input against the server input.
@@ -387,6 +453,7 @@ func (d *Domain) Validate(s *Server) error {
 			}
 		}
 	}
+	add(checkClientRules(d.Client))
 	add(checkAdminText("admin HTTP rewrite", d.Admin.HTTPRewrite))
 	add(checkAdminText("admin HTTP include", d.Admin.HTTPInclude))
 	add(checkAdminText("admin HTTPS rewrite", d.Admin.HTTPSRewrite))

@@ -14,7 +14,7 @@ reloads nginx (A-5). Every include uses a path relative to the main file.
 | File | Content |
 | --- | --- |
 | `nginx.conf` | Main file: `pid`, logs, SSL protocols, default servers, `include vhosts/*.conf`. Built-in only. |
-| `snippets/proxy.conf` | Request headers for Apache in proxy and hybrid mode. |
+| `snippets/proxy.conf` | Request headers for Apache in proxy and hybrid mode, HTTP/1.1 and WebSocket upgrade. |
 | `snippets/fastcgi.conf` | FastCGI parameters for PHP-FPM in nginx mode. |
 | `apps/<name>.conf` | Application templates (T-2), one per template the admin configured. |
 | `vhosts/<domain>.conf` | The domain's server blocks, rendered from the template of its mode. |
@@ -40,19 +40,30 @@ the nginx documentation; the templates link the pages they rely on.
   (M-7). The fallback uses `try_files $uri @backend`
   ([try_files](https://nginx.org/en/docs/http/ngx_http_core_module.html#try_files)).
 - `nginx.conf.tmpl`: nginx serves files and passes `.php` to the domain's
-  PHP-FPM socket (M-9). Requests for hidden files (`/.htaccess`, `/.git/...`)
-  are denied, except `/.well-known/`, which certificate validation needs. If
-  the domain selects an application template, it is included in place of the
-  default `location /`.
+  PHP-FPM socket (M-9). If the domain selects an application template, it is
+  included in place of the default `location /`.
 - `common.tmpl`: helper templates the others call: `listen`, `tls`,
   `includes`, `proxy`.
 
-All modes set `root` to the document root and
-`disable_symlinks if_not_owner from=$document_root`
+All modes set `root` to the document root and `disable_symlinks if_not_owner`
 ([disable_symlinks](https://nginx.org/en/docs/http/ngx_http_core_module.html#disable_symlinks)):
-nginx does not follow a symbolic link to a file owned by another user, so a
-client cannot make nginx serve another account's files (Q-6). Path
-components above the document root are not checked.
+nginx does not follow a symbolic link whose owner differs from the owner of
+its target, so a client cannot make nginx serve another account's files
+(Q-6). Every component of the path is checked, including the document root
+itself: a client who replaces `public_html` with a link to another account's
+directory gets nothing. A `from=` part is deliberately not used, because
+nginx skips the check for that part. Links owned by root to directories
+owned by root (for example `/home` pointing to another disk) still work.
+Hard links are not covered; they rely on the kernel's `protected_hardlinks`.
+
+In hybrid and nginx mode, requests for hidden files (`/.htaccess`,
+`/.user.ini`, `/.git/...`) get 403, except `/.well-known/`, which
+certificate validation needs (M-2). The check is an `if` on `$uri` at server
+level, so it runs before any location is chosen and no admin or client
+location can bypass it, including a `^~` prefix location, which would skip
+a regex location. It does not apply after an internal rewrite of the
+client's own, and proxy mode leaves hidden files to Apache, as without
+nginx.
 
 To get the text of a built-in template as a starting point, use
 `render.Builtin("<name>")`; the WHM page and the CLI will expose it (U-4).
@@ -123,15 +134,15 @@ checked in order of appearance and the first match wins
 ([location](https://nginx.org/en/docs/http/ngx_http_core_module.html#location)).
 Prefix and exact locations do not depend on order. So:
 
-- no client or admin location can expose hidden files in nginx mode, because
-  that location comes first;
+- a client or admin location cannot expose hidden files in hybrid and nginx
+  mode (see above);
 - a client regex location comes before the template's `\.php$` and static
   extension locations, so the client can refine them for own paths, for
   example add `expires` for images. Shadowing them affects only the client's
   own site (assumption 5 of the client rules);
-- a client `location /` duplicates the template's `location /`; nginx rejects
-  a duplicate location, so such a rule fails `nginx -t` and is not applied
-  (T-9).
+- a client `location /` (or `location ^~ /`) would duplicate the template's
+  `location /`, which nginx rejects; the generator refuses such client rules
+  with a clear error instead of letting the domain's `nginx -t` fail.
 
 Things to know when writing rules:
 
@@ -147,7 +158,17 @@ Things to know when writing rules:
   a client `rewrite ... last` can reach them (assumption 4 of the client
   rules).
 - `.htaccess` has no effect on what nginx serves in hybrid and nginx mode
-  (M-8).
+  (M-8). Directories protected by `.htaccess` (for example cPanel Directory
+  Privacy) are not protected for files nginx serves itself.
+- **In proxy and hybrid mode a client location serves files from disk.** The
+  client whitelist has no `proxy_pass`, so a client location such as
+  `location /app/ { expires 1h; }` makes nginx answer requests under `/app/`
+  from the document root instead of passing them to Apache: PHP files there
+  are sent as source, and `.htaccess` rules do not apply. This affects only
+  the client's own site; how to handle it (refuse locations for these modes,
+  or add a fallback to Apache) is an open question.
+- Client rules apply to both the HTTP and the HTTPS server; a client
+  `return 301 https://...` without a scheme check loops on HTTPS.
 
 ## Default servers
 
@@ -167,13 +188,33 @@ address) the main file defines a default server
   QUIC documentation recommends it for several worker processes
   ([quic](https://nginx.org/en/docs/quic.html)).
 
+## Requests to Apache (M-6)
+
+`snippets/proxy.conf` sets `Host` to the requested name, `X-Real-IP` to the
+visitor address, appends it to `X-Forwarded-For`, and sets
+`X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Forwarded-Port` from nginx's
+own values. `Forwarded`, `X-Forwarded-Server`, `X-Forwarded-Ssl` and `Proxy`
+from the visitor are removed, so a visitor cannot spoof them. Apache must be
+configured to trust these headers only from nginx (mod_remoteip); that is
+not part of the generator.
+
+If Apache has no TLS port for nginx (`Apache.HTTPS` unset), requests that
+came over HTTPS reach Apache as plain HTTP with `X-Forwarded-Proto: https`.
+Applications that force HTTPS then redirect in a loop unless Apache sets
+`HTTPS=on` from that header. With `Apache.HTTPS` set, nginx connects to
+Apache over TLS with the requested name in SNI.
+
+The main file sets `client_max_body_size` from the server setting (default
+`1g`); nginx's own default of 1m would refuse uploads that Apache accepts.
+
 ## Protocols (M-1)
 
 - HTTPS servers listen with `ssl` and enable HTTP/2 with the `http2`
   directive ([http2](https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2),
   nginx 1.25.1 or later).
 - With HTTP/3 on, HTTPS servers also `listen ... quic` and send
-  `Alt-Svc: h3=":443"; ma=86400`, as in the
+  `Alt-Svc: h3=":443"; ma=86400` (with `always`, so also on error
+  responses), as in the
   [HTTP/3 module example](https://nginx.org/en/docs/http/ngx_http_v3_module.html#example).
   HTTP/3 needs nginx built with `--with-http_v3_module` and TLSv1.3.
 - `ssl_protocols` is set once in the `http` block from the server setting.
@@ -238,6 +279,8 @@ The main file is built-in only; its data is `render.MainData`.
 | `.Temp.UWSGI` | Arg | `uwsgi_temp_path`. |
 | `.Temp.SCGI` | Arg | `scgi_temp_path`. |
 | `.WorkerConnections` | int | `worker_connections`. |
+| `.WorkerNoFile` | int | `worker_rlimit_nofile`, twice the connections. |
+| `.ClientMaxBodySize` | Arg | `client_max_body_size`. |
 | `.SSLProtocols[]` | list of Arg | `ssl_protocols`. |
 | `.Defaults[]` | list | One default server per address and scheme. |
 | `.Defaults[].TLS` | bool | HTTPS default server. |

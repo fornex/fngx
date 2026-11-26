@@ -212,7 +212,7 @@ func (e DomainError) Error() string { return e.Err.Error() }
 // Result is the output of All.
 type Result struct {
 	// Change holds the common files and one unit per rendered domain, in
-	// a deterministic order. It is a full change (apply.Change.Full) only
+	// a deterministic order (units sorted by vhost file name). It is a full change (apply.Change.Full) only
 	// if every domain rendered; otherwise it is incremental, so that the
 	// live configuration of a failed domain is kept instead of removed
 	// (N-4), and the caller must remove deleted domains itself.
@@ -222,8 +222,8 @@ type Result struct {
 	// Warnings lists server names used by more than one domain. For
 	// domains on the same address nginx accepts that with a "conflicting
 	// server name" warning and only one of the server blocks gets the name
-	// (assumption: the first in file order, which is the alphabetically
-	// first domain).
+	// (assumption: the first in file order; the warning names that domain
+	// first).
 	Warnings []string
 }
 
@@ -242,7 +242,12 @@ func (r *Renderer) All(s *Server, domains []Domain) (*Result, error) {
 	for i := range order {
 		order[i] = i
 	}
-	sort.SliceStable(order, func(a, b int) bool { return domains[order[a]].Name < domains[order[b]].Name })
+	// Sort by vhost file name: nginx reads "vhosts/*.conf" in that order
+	// (glob(3) sorts), which decides which block keeps a duplicate name.
+	// It differs from sorting by name: "a.com-x.net.conf" < "a.com.conf".
+	sort.SliceStable(order, func(a, b int) bool {
+		return vhostPath(domains[order[a]].Name) < vhostPath(domains[order[b]].Name)
+	})
 
 	res := &Result{Change: apply.Change{Common: common, Units: make([]apply.Unit, 0, len(domains))}}
 	owner := make(map[model.Domain]model.Domain, len(domains)*2)

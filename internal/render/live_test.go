@@ -39,6 +39,17 @@ func TestIntegrationLive(t *testing.T) {
 
 	// Fake Apache: plain and TLS.
 	apacheHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/headers":
+			_, _ = fmt.Fprintf(w, "xfh=%s xfp=%s fwd=%s xfs=%s upgrade=%s", //nolint:gosec // plain-text test echo
+				req.Header.Get("X-Forwarded-Host"), req.Header.Get("X-Forwarded-Port"),
+				req.Header.Get("Forwarded"), req.Header.Get("X-Forwarded-Ssl"), req.Header.Get("Upgrade"))
+			return
+		case "/upload":
+			n, _ := io.Copy(io.Discard, req.Body)
+			_, _ = fmt.Fprintf(w, "got %d bytes", n)
+			return
+		}
 		sni := ""
 		if req.TLS != nil {
 			sni = req.TLS.ServerName
@@ -86,6 +97,30 @@ func TestIntegrationLive(t *testing.T) {
 	writeFile(t, filepath.Join(php.DocRoot, ".htaccess"), "secret")
 	writeFile(t, filepath.Join(php.DocRoot, ".well-known", "acme-challenge", "tok"), "challenge")
 	writeFile(t, filepath.Join(dedicated.DocRoot, "index.html"), "dedicated site")
+	writeFile(t, filepath.Join(php.DocRoot, "app", ".git", "config"), "secret")
+	writeFile(t, filepath.Join(php.DocRoot, "app", "ok.html"), "app page")
+
+	// A document root that is a link to another owner's directory (Q-6).
+	// Ownership can only be set up as root.
+	asRoot := os.Geteuid() == 0
+	var linked Domain
+	if asRoot {
+		target := filepath.Join(te.work, "victim", "public_html")
+		writeFile(t, filepath.Join(target, "index.html"), "victim's page")
+		for _, p := range []string{filepath.Dir(target), target, filepath.Join(target, "index.html")} {
+			if err := os.Chown(p, 65534, 65534); err != nil {
+				t.Fatal(err)
+			}
+		}
+		linked = te.domain("linked.example", model.ModeNginx)
+		if err := os.MkdirAll(filepath.Dir(linked.DocRoot), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, linked.DocRoot); err != nil {
+			t.Fatal(err)
+		}
+		domains = append(domains, linked)
+	}
 
 	// Fake PHP-FPM.
 	fcgiHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -167,7 +202,44 @@ func TestIntegrationLive(t *testing.T) {
 	}
 
 	// Symbolic links to files of another owner are not followed (Q-6).
-	if os.Geteuid() == 0 {
+	// Forwarding headers from the visitor are replaced or removed (M-6),
+	// and large bodies pass (client_max_body_size).
+	req, _ := http.NewRequest(http.MethodGet, httpURL("proxy.example", "/headers"), nil)
+	for k, v := range map[string]string{"X-Forwarded-Host": "evil.example", "X-Forwarded-Port": "1", "Forwarded": "for=1.2.3.4;host=evil.example", "X-Forwarded-Ssl": "on"} {
+		req.Header.Set(k, v)
+	}
+	if resp, err := h.Do(req); err != nil {
+		t.Error(err)
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		want := fmt.Sprintf("xfh=proxy.example xfp=%d fwd= xfs= upgrade=", te.httpPort)
+		if string(body) != want {
+			t.Errorf("forwarding headers: got %q, want %q", body, want)
+		}
+	}
+	if resp, err := h.Post(httpURL("proxy.example", "/upload"), "application/octet-stream", strings.NewReader(strings.Repeat("x", 3<<20))); err != nil {
+		t.Error(err)
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if string(body) != "got 3145728 bytes" {
+			t.Errorf("3 MiB upload: got %d %q", resp.StatusCode, body)
+		}
+	}
+
+	// A client "^~" location skips regex locations, but not the
+	// server-level hidden-file check.
+	expect(t, h, httpURL("php.example", "/app/ok.html"), 200, "app page")
+	expect(t, h, httpURL("php.example", "/app/.git/config"), 403, "")
+
+	if asRoot {
+		if r := get(t, h, httpURL("linked.example", "/index.html")); r.status == 200 || strings.Contains(r.body, "victim") {
+			t.Errorf("document root linked to another owner's directory was served: %d %q", r.status, r.body)
+		}
+	}
+
+	if asRoot {
 		other := filepath.Join(te.work, "other", "secret.txt")
 		writeFile(t, other, "other user's file")
 		if err := os.Chown(other, 65534, 65534); err != nil {

@@ -5,7 +5,7 @@ server {
     listen 80;
     server_name example.com;
     root /home/alice/example.com;
-    disable_symlinks if_not_owner from=$document_root;
+    disable_symlinks if_not_owner;
 
     location / {
         proxy_pass http://127.0.0.1:8080;

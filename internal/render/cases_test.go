@@ -71,6 +71,7 @@ add_header X-Client "yes it is";
 rewrite ^/old/(.*)$ /new/$1 permanent;
 location ~* \.png$ { expires 30d; }
 deny 203.0.113.0/24;
+location ^~ /app/ { expires 1h; }
 `
 
 func clientRules(t testing.TB) *userrules.Rules {

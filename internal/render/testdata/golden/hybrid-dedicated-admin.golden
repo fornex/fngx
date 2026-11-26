@@ -14,7 +14,16 @@ server {
     listen 192.0.2.10:80;
     server_name addon.example;
     root /home/alice/addon.example;
-    disable_symlinks if_not_owner from=$document_root;
+    disable_symlinks if_not_owner;
+
+    # Hidden files (.htaccess, .user.ini, .git/...) except /.well-known/,
+    # which certificate validation needs (M-2). Checked at server level,
+    # before any location is chosen, so no location of an admin or client
+    # rule (including "^~" prefixes, which skip regex locations) can serve
+    # them. $uri is the decoded, normalized URI.
+    if ($uri ~ "/\.(?!well-known(?:/|$))") {
+        return 403;
+    }
     include domains/addon.example/http-rewrite.conf;
     include domains/addon.example/http-include.conf;
 
@@ -40,7 +49,16 @@ server {
     ssl_certificate_key /etc/ssl/test/addon.example.key;
     http2 on;
     root /home/alice/addon.example;
-    disable_symlinks if_not_owner from=$document_root;
+    disable_symlinks if_not_owner;
+
+    # Hidden files (.htaccess, .user.ini, .git/...) except /.well-known/,
+    # which certificate validation needs (M-2). Checked at server level,
+    # before any location is chosen, so no location of an admin or client
+    # rule (including "^~" prefixes, which skip regex locations) can serve
+    # them. $uri is the decoded, normalized URI.
+    if ($uri ~ "/\.(?!well-known(?:/|$))") {
+        return 403;
+    }
     include domains/addon.example/https-rewrite.conf;
     include domains/addon.example/https-include.conf;
 
