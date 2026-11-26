@@ -163,6 +163,10 @@ type testEnv struct {
 func newEnv(t *testing.T) *testEnv {
 	t.Helper()
 	env := &testEnv{root: t.TempDir(), nginx: &fakeNginx{}, logs: &syncBuffer{}}
+	// New refuses a root others can write; do not depend on the umask.
+	if err := os.Chmod(env.root, 0o700); err != nil { //nolint:gosec // a directory needs the execute bit
+		t.Fatal(err)
+	}
 	env.cfg = Config{
 		Root:     env.root,
 		MainFile: "nginx.conf",

@@ -36,6 +36,7 @@ var (
 	DefaultRoot        = "/etc/" + product.Name + "/nginx"
 	DefaultLogFile     = "/var/log/" + product.Name + "/apply.log"
 	DefaultNginxBinary = "/usr/local/" + product.Name + "/sbin/nginx" // assumption: install path of the nginx build
+	DefaultPIDFile     = "/run/" + product.Name + "/nginx.pid"        // assumption: "pid" directive of the generated main file
 )
 
 // Default values for Config.
@@ -74,6 +75,7 @@ func DefaultConfig() Config {
 		MaxTests: DefaultMaxTests,
 		Nginx: &ExecNginx{
 			Binary:        DefaultNginxBinary,
+			PIDFile:       DefaultPIDFile,
 			TestTimeout:   DefaultTestTimeout,
 			ReloadTimeout: DefaultReloadTimeout,
 		},
@@ -150,6 +152,13 @@ type Result struct {
 	Rejected []UnitError
 	// Tests is the number of "nginx -t" runs.
 	Tests int
+	// Unchanged is set when the change matched the live set: no generation
+	// was created and nginx was not reloaded.
+	Unchanged bool
+	// Reloaded is set when nginx confirmed the reload. It is false after a
+	// successful Apply only if nginx is not running (ErrNotRunning); the new
+	// set is then used when nginx starts.
+	Reloaded bool
 }
 
 // UnitError is the test output that made a unit fail.
@@ -291,13 +300,17 @@ func (e *Engine) run(ctx context.Context, action string, ch Change, commit bool)
 	if err := e.settle(ctx, c, &ch, res, log); err != nil {
 		return res, err
 	}
+	if !commit {
+		return res, nil
+	}
 	if c.sameAsLive() && liveName != "" {
 		if len(res.Rejected) > 0 {
 			return res, ErrNoChange
 		}
+		// Nothing to do. Not creating a generation keeps the rollback
+		// history from being pushed out by repeated identical applies.
 		log.Info("candidate equals live set", "live", liveName)
-	}
-	if !commit {
+		res.Generation, res.Unchanged = liveName, true
 		return res, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -316,13 +329,32 @@ func (e *Engine) run(ctx context.Context, action string, ch Change, commit bool)
 		return res, err
 	}
 	if err := e.swap(name); err != nil {
-		keepCandidate = false
-		_ = e.clearPending()
-		return res, err
+		// The rename may have succeeded and only the directory sync failed:
+		// look at what is live before deciding what to clean up.
+		now, lerr := e.liveGeneration()
+		switch {
+		case lerr != nil:
+			// Keep the candidate and the marker; recovery sorts it out.
+			log.Error("swap failed, live link state unknown", "error", err, "check_error", lerr)
+			return res, fmt.Errorf("apply: swap: %w", err)
+		case now == liveName:
+			keepCandidate = false
+			_ = e.clearPending()
+			return res, err
+		default:
+			log.Warn("swapped, but syncing the root directory failed", "error", err)
+		}
 	}
 	log.Info("swapped", "from", liveName, "to", name)
 
-	if out, rerr := e.cfg.Nginx.Reload(ctx, e.LiveConf()); rerr != nil {
+	out, rerr := e.cfg.Nginx.Reload(ctx, e.LiveConf())
+	if errors.Is(rerr, ErrNotRunning) {
+		log.Warn("nginx not running; new set will be used when it starts", "generation", name, "error", rerr)
+		rerr = nil
+	} else if rerr == nil {
+		res.Reloaded = true
+	}
+	if rerr != nil {
 		log.Error("reload failed", "generation", name, "error", rerr, "output", capText(out))
 		rerrFull := &ReloadError{Output: out, Err: rerr}
 		rerrFull.RollbackErr = e.rollback(ctx, liveName, log)
@@ -364,6 +396,10 @@ func (e *Engine) rollback(ctx context.Context, prev string, log *slog.Logger) er
 		return err
 	}
 	out, err := e.cfg.Nginx.Reload(ctx, e.LiveConf())
+	if errors.Is(err, ErrNotRunning) {
+		log.Warn("rolled back; nginx not running", "to", prev)
+		return nil
+	}
 	if err != nil {
 		log.Error("rollback reload failed", "to", prev, "error", err, "output", capText(out))
 		return fmt.Errorf("reload of %s: %w: %s", prev, err, strings.TrimSpace(out))
@@ -553,8 +589,8 @@ func (e *Engine) finishInterrupted(ctx context.Context, pm pendingMarker, log *s
 	log.Warn("finishing interrupted operation", "prev", pm.Prev, "next", pm.Next, "live", live)
 	if live != "" {
 		out, rerr := e.cfg.Nginx.Reload(ctx, e.LiveConf())
-		if rerr == nil {
-			log.Info("reloaded", "generation", live)
+		if rerr == nil || errors.Is(rerr, ErrNotRunning) {
+			log.Info("interrupted operation finished", "generation", live, "reload", errString(rerr))
 			return e.clearPending()
 		}
 		log.Error("reload failed", "generation", live, "error", rerr, "output", capText(out))
@@ -624,4 +660,11 @@ func capText(s string) string {
 		return s[:limit] + "...(truncated)"
 	}
 	return s
+}
+
+func errString(err error) string {
+	if err == nil {
+		return "ok"
+	}
+	return err.Error()
 }

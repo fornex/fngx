@@ -25,7 +25,16 @@ type candidate struct {
 	written  map[string]bool   // relative paths written (not linked)
 	newUnits map[string]Unit   // changed units, by id
 	suspects []string          // ids of changed units, sorted
+	// conflicts are changed units whose files collide with files kept
+	// from the live set; they are rejected before the first test (N-4).
+	conflicts []UnitError
 }
+
+// conflictError means a unit's files collide with files of another unit or
+// the common files: the same path, or one path is a directory of the other.
+type conflictError struct{ msg string }
+
+func (e *conflictError) Error() string { return e.msg }
 
 // buildCandidate creates dir and fills it from the live generation and the
 // change. Unchanged content is linked from the live generation.
@@ -113,7 +122,13 @@ func buildCandidate(name, dir, liveDir string, live *manifest, ch *Change) (*can
 	for _, id := range sortedKeys(changed) {
 		c.newUnits[id] = changed[id]
 		c.suspects = append(c.suspects, id)
-		if err := c.setNew(id); err != nil {
+		err := c.setNew(id)
+		var ce *conflictError
+		if errors.As(err, &ce) {
+			c.conflicts = append(c.conflicts, UnitError{Unit: id, Output: ce.msg})
+			err = c.setOld(id)
+		}
+		if err != nil {
 			return c, err
 		}
 	}
@@ -122,7 +137,27 @@ func buildCandidate(name, dir, liveDir string, live *manifest, ch *Change) (*can
 
 func (c *candidate) claim(rel, who string) error {
 	if prev, ok := c.owner[rel]; ok {
-		return fmt.Errorf("apply: path %q used by both %s and %s", rel, describeOwner(prev), describeOwner(who))
+		return &conflictError{fmt.Sprintf("path %q used by both %s and %s", rel, describeOwner(prev), describeOwner(who))}
+	}
+	for d := filepath.Dir(rel); d != "."; d = filepath.Dir(d) {
+		if prev, ok := c.owner[d]; ok {
+			return &conflictError{fmt.Sprintf("path %q of %s is below file %q of %s", rel, describeOwner(who), d, describeOwner(prev))}
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(c.dir, rel)); err == nil {
+		// Only directories that hold other files remain on disk.
+		return &conflictError{fmt.Sprintf("path %q of %s is a directory of other files", rel, describeOwner(who))}
+	}
+	return nil
+}
+
+// claimAll checks a whole unit before anything is written, so that a
+// conflict leaves the candidate unchanged.
+func (c *candidate) claimAll(paths []string, who string) error {
+	for _, rel := range paths {
+		if err := c.claim(rel, who); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -181,14 +216,40 @@ func (c *candidate) removeUnit(id string) error {
 		}
 		delete(c.owner, rel)
 		delete(c.written, rel)
+		// Remove directories left empty, so they cannot block a later file
+		// of the same name.
+		for d := filepath.Dir(rel); d != "."; d = filepath.Dir(d) {
+			if err := os.Remove(filepath.Join(c.dir, d)); err != nil {
+				break
+			}
+			delete(c.dirs, d)
+		}
 	}
 	delete(c.m.Units, id)
 	return nil
 }
 
+// revert puts the live version of every unit in ids back. All of them are
+// removed first, so that one unit's old files never collide with another
+// reverted unit's new files.
+func (c *candidate) revert(ids []string) error {
+	for _, id := range ids {
+		if err := c.removeUnit(id); err != nil {
+			return err
+		}
+	}
+	for _, id := range ids {
+		if err := c.setOld(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // setOld puts the live version of unit id into the candidate, or leaves the
-// unit out if it is not live. If the live files would collide with another
-// unit's new files, the unit is left out as well.
+// unit out if it is not live. If the live files collide with another unit's
+// new files, the unit cannot be kept at its previous version and the error
+// aborts the operation: silently dropping a live domain is worse.
 func (c *candidate) setOld(id string) error {
 	if err := c.removeUnit(id); err != nil {
 		return err
@@ -197,10 +258,8 @@ func (c *candidate) setOld(id string) error {
 	if !ok {
 		return nil
 	}
-	for _, rel := range old.Files {
-		if _, taken := c.owner[rel]; taken {
-			return nil
-		}
+	if err := c.claimAll(old.Files, id); err != nil {
+		return fmt.Errorf("apply: cannot keep unit %q at its previous version: %w", id, err)
 	}
 	c.m.Units[id] = manifestUnit{Hash: old.Hash, Files: append([]string(nil), old.Files...)}
 	for _, rel := range old.Files {
@@ -217,6 +276,9 @@ func (c *candidate) setNew(id string) error {
 		return err
 	}
 	u := c.newUnits[id]
+	if err := c.claimAll(unitFiles(u), id); err != nil {
+		return err
+	}
 	c.m.Units[id] = manifestUnit{Hash: unitHash(u), Files: unitFiles(u)}
 	for _, f := range u.Files {
 		if err := c.writeFile(f.Path, f.Data, id); err != nil {

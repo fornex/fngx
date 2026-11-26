@@ -73,6 +73,16 @@ func (e *Engine) settle(ctx context.Context, c *candidate, ch *Change, res *Resu
 		return fmt.Errorf("apply: nginx test could not run: %w: %s", err, strings.TrimSpace(out))
 	}
 
+	for _, ue := range c.conflicts {
+		if ch.AllOrNothing {
+			return fmt.Errorf("apply: unit %q: %s", ue.Unit, ue.Output)
+		}
+		res.Rejected = append(res.Rejected, ue)
+		log.Warn("unit rejected", "unit", ue.Unit, "output", ue.Output)
+	}
+
+	preRejected := len(res.Rejected)
+
 	out, err := test()
 	if err == nil {
 		return nil
@@ -101,14 +111,16 @@ func (e *Engine) settle(ctx context.Context, c *candidate, ch *Change, res *Resu
 	}
 
 	// 2. Bisection over the changed units still at their new version.
+	// The candidate now holds exactly the set of the last failed test.
+	lastOut := out
 	var included []string
 	for _, id := range c.suspects {
 		if c.isNew(id) {
 			included = append(included, id)
-			if err := c.setOld(id); err != nil {
-				return err
-			}
 		}
+	}
+	if err := c.revert(included); err != nil {
+		return err
 	}
 	if len(included) > 0 {
 		if out, err := test(); err != nil {
@@ -141,10 +153,8 @@ func (e *Engine) settle(ctx context.Context, c *candidate, ch *Change, res *Resu
 			if !errors.Is(err, ErrConfigInvalid) {
 				return false, fail(out, err)
 			}
-			for _, id := range group {
-				if err := c.setOld(id); err != nil {
-					return false, err
-				}
+			if err := c.revert(group); err != nil {
+				return false, err
 			}
 		}
 		if len(group) == 1 {
@@ -163,7 +173,8 @@ func (e *Engine) settle(ctx context.Context, c *candidate, ch *Change, res *Resu
 		return false, err
 	}
 	if len(included) > 0 {
-		if _, err := search(included, ""); err != nil {
+		// Adding every unit back recreates the failed set; no need to test it.
+		if _, err := search(included, lastOut); err != nil {
 			return err
 		}
 	}
@@ -172,7 +183,7 @@ func (e *Engine) settle(ctx context.Context, c *candidate, ch *Change, res *Resu
 	if out, err := test(); err != nil {
 		return fail(out, err)
 	}
-	if len(res.Rejected) == 0 {
+	if len(res.Rejected) == preRejected {
 		// Bisection found every unit fine on its own; the first failure did
 		// not reproduce. Refuse rather than guess.
 		return &TestError{Output: firstOut}

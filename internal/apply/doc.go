@@ -37,8 +37,11 @@
 //     still apply (N-4). The final set is always re-tested as a whole.
 //  5. fsync the candidate, then switch Root/live atomically: a new symlink is
 //     created next to it and renamed over it.
-//  6. Reload nginx (N-5). If the reload command fails, point Root/live back to
-//     the previous generation and reload again.
+//  6. Reload nginx (N-5) and wait until the master has started new worker
+//     processes, which shows it read and accepted the new set (see
+//     ExecNginx.Reload). If it does not, point Root/live back to the
+//     previous generation and reload again. If nginx is not running, the new
+//     set simply stays live for the next start.
 //  7. Remove old generations beyond Config.Keep.
 //
 // The nginx command-line switches used here (-t, -c, -p, -s reload) are

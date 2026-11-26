@@ -235,8 +235,8 @@ func TestApplyIsolatesByBisection(t *testing.T) { // N-4
 			t.Errorf("%s = %q, want %q", id, got, want)
 		}
 	}
-	// 2 broken of 16: first test, baseline, 11 during bisection, final.
-	if res.Tests != 14 {
+	// 2 broken of 16: first test, baseline, 10 during bisection, final.
+	if res.Tests != 13 {
 		t.Fatalf("tests = %d", res.Tests)
 	}
 }

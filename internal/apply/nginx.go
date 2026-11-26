@@ -17,13 +17,20 @@ import (
 // configuration.
 var ErrConfigInvalid = errors.New("nginx rejected the configuration")
 
+// ErrNotRunning is wrapped by Nginx.Reload when no nginx master process is
+// running. The new set is then live on disk and nginx uses it when it
+// starts; the engine treats this as success.
+var ErrNotRunning = errors.New("nginx is not running")
+
 // Nginx is the part of nginx the engine needs. Tests substitute a fake.
 type Nginx interface {
 	// Test checks the configuration whose main file is conf and returns the
 	// combined output of the check.
 	Test(ctx context.Context, conf string) (output string, err error)
 	// Reload asks the running nginx to re-read the configuration whose main
-	// file is conf.
+	// file is conf. It should return only once nginx has finished reading
+	// it, so that the engine does not swap the live set while nginx is still
+	// reading files through it.
 	Reload(ctx context.Context, conf string) (output string, err error)
 }
 
@@ -60,11 +67,12 @@ func (r ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byt
 	return out.Bytes(), err
 }
 
-// Default timeouts. "nginx -t" on 10,000 server blocks has not been measured
-// yet; the test timeout is a generous assumption.
+// Default timeouts. Reading 10,000 server blocks has not been measured yet;
+// both values are generous assumptions. A reload costs about as much as a
+// test because the master parses the whole configuration again.
 const (
 	DefaultTestTimeout   = 5 * time.Minute
-	DefaultReloadTimeout = 30 * time.Second
+	DefaultReloadTimeout = 5 * time.Minute
 )
 
 // ExecNginx drives a real nginx binary.
@@ -75,7 +83,13 @@ type ExecNginx struct {
 	Prefix string
 	// ExtraArgs are appended to every invocation before the action, for
 	// example []string{"-e", "/var/log/nginx/error.log"} (nginx 1.19.5+).
-	ExtraArgs     []string
+	ExtraArgs []string
+	// PIDFile is the master's PID file, as set by the "pid" directive of the
+	// generated configuration. When set, Reload signals the master directly
+	// and waits until it has started new worker processes; see Reload.
+	PIDFile string
+	// ProcRoot is where the proc file system is mounted; "" means "/proc".
+	ProcRoot      string
 	TestTimeout   time.Duration
 	ReloadTimeout time.Duration
 	Runner        Runner // nil means ExecRunner{}
@@ -108,24 +122,46 @@ func (n *ExecNginx) run(ctx context.Context, timeout time.Duration, args []strin
 // Test runs "nginx -t -c conf". According to
 // https://nginx.org/en/docs/switches.html, -t checks the syntax and then
 // tries to open files referred to in the configuration. A non-zero exit
-// status is reported as ErrConfigInvalid.
+// status is reported as ErrConfigInvalid; a test killed by a signal (for
+// example by the OOM killer) is not, because it says nothing about the
+// configuration.
 func (n *ExecNginx) Test(ctx context.Context, conf string) (string, error) {
 	out, err := n.run(ctx, n.TestTimeout, n.args(conf, "-t"))
 	var exitErr *exec.ExitError
-	if err != nil && errors.As(err, &exitErr) && !isTimeout(err) {
+	if err != nil && errors.As(err, &exitErr) && exitErr.Exited() && !isTimeout(err) {
 		return out, fmt.Errorf("%w: %w", ErrConfigInvalid, err)
 	}
 	return out, err
 }
 
-// Reload runs "nginx -c conf -s reload", which sends the reload signal to
-// the master process whose PID file is named in conf
-// (https://nginx.org/en/docs/switches.html). A zero exit status means the
-// signal was delivered; per https://nginx.org/en/docs/control.html the
-// master then checks the new configuration itself and keeps the old one if
-// it cannot apply it. That outcome is not visible to this command.
+// Reload makes the running master re-read the configuration.
+//
+// With PIDFile set (recommended), it sends SIGHUP to the master and waits
+// until a new child process appears. Per
+// https://nginx.org/en/docs/control.html, on HUP the master checks the new
+// configuration and, only if it can apply it, starts new worker processes;
+// otherwise it keeps working with the old one. So a new child means the
+// configuration was read and accepted, and the live set can safely be
+// swapped again. No new child within ReloadTimeout is reported as an error,
+// which makes the engine roll back. This needs a Linux-style /proc and a
+// master with worker processes (the default "master_process on").
+//
+// Without PIDFile it runs "nginx -c conf -s reload"
+// (https://nginx.org/en/docs/switches.html). That command returns once the
+// signal is sent, before the master has read the configuration, so a
+// rejected configuration goes unnoticed and a swap shortly afterwards may be
+// read halfway. It also parses the whole configuration itself before
+// sending the signal.
 func (n *ExecNginx) Reload(ctx context.Context, conf string) (string, error) {
-	return n.run(ctx, n.ReloadTimeout, n.args(conf, "-s", "reload"))
+	if n.PIDFile == "" {
+		return n.run(ctx, n.ReloadTimeout, n.args(conf, "-s", "reload"))
+	}
+	if n.ReloadTimeout <= 0 {
+		return "", errors.New("apply: nginx timeout must be positive")
+	}
+	ctx, cancel := context.WithTimeout(ctx, n.ReloadTimeout)
+	defer cancel()
+	return "", n.signalReload(ctx)
 }
 
 func isTimeout(err error) bool {

@@ -59,6 +59,7 @@ func newRealEnv(t *testing.T, ng Nginx) *realEnv {
 		Binary:        bin,
 		Prefix:        work,
 		ExtraArgs:     []string{"-e", filepath.Join(work, "error.log")},
+		PIDFile:       filepath.Join(work, "nginx.pid"),
 		TestTimeout:   30 * time.Second,
 		ReloadTimeout: 10 * time.Second,
 	}
@@ -157,28 +158,18 @@ func TestIntegrationNginxTest(t *testing.T) { // A-5, T-9, N-4
 	}
 }
 
-// starter starts nginx on the first reload, when no master is running yet,
-// and stops it when the test ends.
-type starter struct {
-	*ExecNginx
-	t       *testing.T
-	pidFile string
-	started bool
-}
-
-func (s *starter) Reload(ctx context.Context, conf string) (string, error) {
-	if s.started {
-		return s.ExecNginx.Reload(ctx, conf)
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+// startNginx starts a master with the live configuration, as the service
+// manager would, and stops it when the test ends.
+func (env *realEnv) startNginx(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := ExecRunner{}.Run(ctx, s.Binary, s.args(conf)...)
+	out, err := ExecRunner{}.Run(ctx, env.nginx.Binary, env.nginx.args(env.engine.LiveConf())...)
 	if err != nil {
-		return string(out), err
+		t.Fatalf("start nginx: %v: %s", err, out)
 	}
-	s.started = true
-	s.t.Cleanup(func() {
-		data, err := os.ReadFile(s.pidFile)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(env.nginx.PIDFile)
 		if err != nil {
 			return
 		}
@@ -186,30 +177,39 @@ func (s *starter) Reload(ctx context.Context, conf string) (string, error) {
 			_ = syscall.Kill(pid, syscall.SIGQUIT)
 		}
 	})
-	return string(out), nil
 }
 
 func TestIntegrationNginxReload(t *testing.T) { // A-5, N-5
-	s := &starter{t: t}
-	env := newRealEnv(t, s)
-	s.ExecNginx = env.nginx
-	s.pidFile = filepath.Join(env.work, "nginx.pid")
+	env := newRealEnv(t, nil)
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("confirmed reload needs /proc")
+	}
 	ctx := context.Background()
 
-	if _, err := env.engine.Apply(ctx, env.full(env.vhost("a.test", "v1"), env.vhost("b.test", "b"))); err != nil {
+	// First deployment: nginx is not running yet.
+	res, err := env.engine.Apply(ctx, env.full(env.vhost("a.test", "v1"), env.vhost("b.test", "b")))
+	if err != nil {
 		t.Fatal(err)
 	}
+	if res.Reloaded {
+		t.Fatal("reload reported without a running nginx")
+	}
+	env.startNginx(t)
 	waitBody(t, env.port, "a.test", "v1")
 
-	// The running master was started with -c root/live/nginx.conf. After the
-	// swap and reload it must serve the new generation.
-	if _, err := env.engine.Apply(ctx, Change{Units: []Unit{env.vhost("a.test", "v2")}}); err != nil {
+	// The master was started with -c root/live/nginx.conf. After the swap
+	// and a confirmed reload it serves the new generation at once.
+	res, err = env.engine.Apply(ctx, Change{Units: []Unit{env.vhost("a.test", "v2")}})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !res.Reloaded {
+		t.Fatal("reload not confirmed")
 	}
 	waitBody(t, env.port, "a.test", "v2")
 
 	// A broken unit keeps its live version; the other change is applied.
-	res, err := env.engine.Apply(ctx, Change{Units: []Unit{brokenVhost("a.test"), env.vhost("b.test", "b2")}})
+	res, err = env.engine.Apply(ctx, Change{Units: []Unit{brokenVhost("a.test"), env.vhost("b.test", "b2")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +218,31 @@ func TestIntegrationNginxReload(t *testing.T) { // A-5, N-5
 	}
 	waitBody(t, env.port, "b.test", "b2")
 	waitBody(t, env.port, "a.test", "v2")
+
+	// A set that passes "nginx -t" but that the master cannot apply: the
+	// port is taken (-t does not bind). The master keeps the old set and
+	// starts no workers, so the engine must roll back.
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = busy.Close() }()
+	port := busy.Addr().(*net.TCPAddr).Port
+	clash := Unit{ID: "c.test", Files: []File{{Path: "vhosts/c.test.conf", Data: []byte(fmt.Sprintf(
+		"server {\n    listen 127.0.0.1:%d;\n    server_name c.test;\n    return 200 c;\n}\n", port))}}}
+	before := env.engine.LiveConf()
+	liveBefore, _ := filepath.EvalSymlinks(filepath.Dir(before))
+	env.nginx.ReloadTimeout = 3 * time.Second
+	_, err = env.engine.Apply(ctx, Change{Units: []Unit{clash}})
+	var re *ReloadError
+	if !errors.As(err, &re) || !re.RolledBack {
+		t.Fatalf("err = %v, want a rolled-back ReloadError", err)
+	}
+	liveAfter, _ := filepath.EvalSymlinks(filepath.Dir(before))
+	if liveAfter != liveBefore {
+		t.Fatalf("live = %s, want %s", liveAfter, liveBefore)
+	}
+	waitBody(t, env.port, "b.test", "b2")
 }
 
 // waitBody polls until the server returns want. A reload is asynchronous:
