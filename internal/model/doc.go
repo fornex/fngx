@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package model defines the settings model: three layers of settings
 // (server, user, domain) with inheritance (A-3), the per-domain mode
 // (M-3, M-4, M-5), per-setting admin permissions (U-1, U-8, A-7), and

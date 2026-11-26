@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package store keeps the settings layers of package model in plain text
 // files, without a database (A-3).
 //
