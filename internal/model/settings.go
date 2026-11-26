@@ -232,8 +232,10 @@ type Effective struct {
 	Cache       Resolved[bool]
 }
 
+// pick fails closed: only a known unlocking access level lets the user
+// and domain layers through, so an invalid value acts as locked.
 func pick[T any](a Access, builtin T, srv, usr, dom *T) Resolved[T] {
-	if a != AccessLocked {
+	if a == AccessAdmin || a == AccessClient {
 		if dom != nil {
 			return Resolved[T]{*dom, LayerDomain}
 		}
@@ -250,7 +252,7 @@ func pick[T any](a Access, builtin T, srv, usr, dom *T) Resolved[T] {
 // Resolve computes the effective settings of a domain owned by a user:
 // domain overrides user overrides server overrides built-in (A-3), except
 // for locked settings, which always come from the server or built-in
-// defaults (U-1). Inputs are assumed valid (see Validate).
+// defaults (U-1). An invalid access level is treated as locked.
 func Resolve(srv Server, user, domain Settings) Effective {
 	d := srv.Defaults
 	return Effective{
@@ -265,6 +267,11 @@ func Resolve(srv Server, user, domain Settings) Effective {
 // installation (M-4). The mode is written into the domain layer instead
 // of being inherited, so a later change of the default mode applies only
 // to domains created after it and never switches existing sites.
+//
+// As a consequence the server and user mode are defaults for new domains
+// only: changing the user mode does not change domains that already
+// exist. CheckClientChange keeps the client from removing the stamped
+// mode; the admin can still remove it on purpose.
 func NewDomainSettings(srv Server, user Settings) Settings {
 	m := Resolve(srv, user, Settings{}).Mode.Value
 	return Settings{Mode: &m}
@@ -288,11 +295,16 @@ var ErrNotPermitted = errors.New("not permitted")
 
 // CheckClientChange checks a change of a domain layer requested by the
 // client from cPanel (U-8). Every changed field must have client access,
-// and the new layer must be valid. Changes made by the admin do not go
-// through this check.
+// and the new layer must be valid. The client may replace the mode but not
+// remove it, which would make the domain follow later changes of the
+// default mode (M-4). Changes made by the admin do not go through this
+// check. before must be the stored layer, not a value from the client.
 func CheckClientChange(srv Server, before, after Settings) error {
 	if err := after.Validate(); err != nil {
 		return err
+	}
+	if before.Mode != nil && after.Mode == nil {
+		return fmt.Errorf("%w: client may not remove the mode of a domain", ErrNotPermitted)
 	}
 	var denied []string
 	for _, f := range before.Diff(after) {

@@ -22,6 +22,13 @@ func TestParseDomain_N6(t *testing.T) {
 		{"sub.example.com", "sub.example.com", true},
 		{"a.b.c.d.example.co.uk", "a.b.c.d.example.co.uk", true},
 		{"xn--e1afmkfd.xn--p1ai", "xn--e1afmkfd.xn--p1ai", true},
+		{"xn--mnchen-3ya.de", "xn--mnchen-3ya.de", true},
+		{"xn--bcher-kva.example", "xn--bcher-kva.example", true},
+		{"xn--a.com", "", false},
+		{"xn--zzzzzzzzzzzzzzzzzzzzzzzz.com", "", false},
+		{"a.xn--9", "", false},
+		{"xn--abc-.com", "", false},
+		{"xn---abc.com", "", false},
 		{"my-site1.com", "my-site1.com", true},
 		{"1example.com", "1example.com", true},
 		{"example.xn--p1ai", "example.xn--p1ai", true},
@@ -124,6 +131,9 @@ func TestParsePHPVersion_PHP1(t *testing.T) {
 		{"php..83", false},
 		{"php83.", false},
 		{"php83-", false},
+		{"a.-b", false},
+		{"a-.b", false},
+		{"a._b", false},
 		{"-php83", false},
 		{"EA-PHP83", false},
 		{"ea php83", false},
@@ -165,6 +175,13 @@ func TestParseTemplateName_T4(t *testing.T) {
 				t.Fatalf("ParseTemplateName(%q) error = %v, want ok=%v", tt.in, err, tt.ok)
 			}
 		})
+	}
+}
+
+func TestErrorMessageEscapesBytes(t *testing.T) {
+	_, err := ParsePHPVersion("ea-php83\xff")
+	if err == nil || !strings.Contains(err.Error(), `'\xff'`) {
+		t.Fatalf("got %v", err)
 	}
 }
 

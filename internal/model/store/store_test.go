@@ -387,7 +387,7 @@ func TestInitExistingSites_M5(t *testing.T) {
 	writeRaw(t, filepath.Join(s.domains, "broken.com"), "{")
 	domains := []model.Domain{"a.com", "sub.a.com", "hybrid.com", "cached.com", "broken.com", "bad_name.com"}
 
-	n, err := s.InitExistingSites(domains)
+	n, err := s.InitExistingSites(model.Server{}, domains)
 	if n != 3 {
 		t.Errorf("written %d, want 3", n)
 	}
@@ -405,7 +405,7 @@ func TestInitExistingSites_M5(t *testing.T) {
 		t.Error("other fields lost")
 	}
 	// Idempotent.
-	if n, _ := s.InitExistingSites(domains[:4]); n != 0 {
+	if n, _ := s.InitExistingSites(model.Server{}, domains[:4]); n != 0 {
 		t.Errorf("second run wrote %d files", n)
 	}
 }
@@ -433,5 +433,62 @@ func TestWriteIntoMissingDirectory(t *testing.T) {
 	}
 	if _, err := s.ListUsers(); err == nil {
 		t.Fatal("listing a removed directory succeeded")
+	}
+}
+
+func TestInitExistingSitesRefusesLockedMode_M5(t *testing.T) {
+	s := newStore(t)
+	for _, a := range []model.Access{model.AccessLocked, "bogus"} {
+		srv := model.Server{Access: map[model.Field]model.Access{model.FieldMode: a}}
+		n, err := s.InitExistingSites(srv, []model.Domain{"old.com"})
+		if n != 0 || !errors.Is(err, model.ErrNotPermitted) {
+			t.Fatalf("access %q: written %d, err %v", a, n, err)
+		}
+	}
+	if _, err := s.LoadDomain("old.com"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("file written: %v", err)
+	}
+}
+
+func TestInitExistingSitesDuplicates_M5(t *testing.T) {
+	s := newStore(t)
+	n, err := s.InitExistingSites(model.Server{}, []model.Domain{"a.com", "a.com"})
+	if err != nil || n != 1 {
+		t.Fatalf("written %d, err %v", n, err)
+	}
+}
+
+// TestUpdateDomainAsClient_U8 checks the client path end to end: the
+// stored layer, not a client-supplied one, is the base of the check.
+func TestUpdateDomainAsClient_U8(t *testing.T) {
+	s := newStore(t)
+	srv := model.Server{}
+	if err := s.UpdateDomainAsClient("new.com", srv, model.Settings{Mode: ptr(model.ModeProxy)}); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("unregistered domain: %v", err)
+	}
+	if err := s.SaveDomain("a.com", model.Settings{Mode: ptr(model.ModeNginx), Cache: ptr(true)}); err != nil {
+		t.Fatal(err)
+	}
+	// Cache is locked by default, so dropping it is a forbidden change.
+	if err := s.UpdateDomainAsClient("a.com", srv, model.Settings{Mode: ptr(model.ModeProxy)}); !errors.Is(err, model.ErrNotPermitted) {
+		t.Fatalf("forbidden change accepted: %v", err)
+	}
+	if err := s.UpdateDomainAsClient("a.com", srv, model.Settings{Mode: ptr(model.ModeProxy), Cache: ptr(true)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.LoadDomain("a.com"); *got.Mode != model.ModeProxy {
+		t.Fatalf("mode not saved: %v", *got.Mode)
+	}
+	if err := s.UpdateDomainAsClient("a.com", srv, model.Settings{Cache: ptr(true)}); !errors.Is(err, model.ErrNotPermitted) {
+		t.Fatalf("mode removal accepted: %v", err)
+	}
+}
+
+func TestListErrorsEscapeNames(t *testing.T) {
+	s := newStore(t)
+	writeRaw(t, filepath.Join(s.domains, "x\nFAKE LOG LINE"), "{}")
+	_, err := s.ListDomains()
+	if err == nil || strings.Contains(err.Error(), "\n") {
+		t.Fatalf("name not escaped: %q", err)
 	}
 }

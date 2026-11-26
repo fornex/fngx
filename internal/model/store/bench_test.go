@@ -133,7 +133,7 @@ func BenchmarkInitExistingSites10k(b *testing.B) {
 		b.StopTimer()
 		s := newStore(b)
 		b.StartTimer()
-		n, err := s.InitExistingSites(domains)
+		n, err := s.InitExistingSites(model.Server{}, domains)
 		if err != nil || n != benchDomains {
 			b.Fatalf("written %d: %v", n, err)
 		}

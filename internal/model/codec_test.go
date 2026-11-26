@@ -210,6 +210,13 @@ func FuzzParseSettings(f *testing.F) {
 
 func FuzzParseServer(f *testing.F) {
 	fuzzSeeds(f)
+	for _, s := range []string{
+		`{"version":1,"defaults":{"mode":"hybrid","php_version":"8.3","app_template":"none","cache":true},"access":{"mode":"locked","php_version":"admin","app_template":"client","cache":"client"}}`,
+		`{"version":1,"access":{"cache":"Locked"}}`,
+		`{"version":1,"defaults":{"defaults":{}}}`,
+	} {
+		f.Add([]byte(s))
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s, err := ParseServer(data)
 		if err != nil {
@@ -222,8 +229,20 @@ func FuzzParseServer(f *testing.F) {
 		if err != nil {
 			t.Fatalf("accepted value does not marshal: %v", err)
 		}
-		if _, err := ParseServer(out); err != nil {
+		again, err := ParseServer(out)
+		if err != nil {
 			t.Fatalf("re-parse failed: %v\n%s", err, out)
+		}
+		if d := again.Defaults.Diff(s.Defaults); len(d) != 0 {
+			t.Fatalf("round trip changed defaults %v", d)
+		}
+		for _, fld := range Fields() {
+			if again.AccessFor(fld) != s.AccessFor(fld) {
+				t.Fatalf("round trip changed access of %s", fld)
+			}
+		}
+		if out2, _ := MarshalServer(again); !bytes.Equal(out, out2) {
+			t.Fatal("encoding not stable")
 		}
 	})
 }

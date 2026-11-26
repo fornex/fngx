@@ -52,8 +52,9 @@ type Store struct {
 
 // Open opens the settings directory at root, which must be an absolute
 // path, creating it and its subdirectories if needed. The subdirectories
-// must be real directories (not symlinks), and no directory may be
-// writable by group or others.
+// must be real directories (not symlinks); every directory must be owned
+// by the effective user (root in production) and not writable by group
+// or others. Parents of root are not checked: root is chosen by the admin.
 func Open(root string) (*Store, error) {
 	if !filepath.IsAbs(root) {
 		return nil, fmt.Errorf("settings root %q is not an absolute path", root)
@@ -92,6 +93,9 @@ func checkDir(path string, stat func(string) (fs.FileInfo, error)) error {
 	}
 	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("%s: writable by group or others (mode %v)", path, fi.Mode().Perm())
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
+		return fmt.Errorf("%s: owned by uid %d, not by the current user (uid %d)", path, st.Uid, os.Geteuid())
 	}
 	return nil
 }
@@ -231,12 +235,33 @@ func (s *Store) CreateDomain(d model.Domain, srv model.Server, owner model.Setti
 	return true, nil
 }
 
+// UpdateDomainAsClient applies a change requested by the client from
+// cPanel (U-8, A-7). The current layer is read from disk, so the check
+// never trusts a "before" value supplied by the client. The domain must
+// already be registered. Ownership of the domain is checked by the caller.
+func (s *Store) UpdateDomainAsClient(d model.Domain, srv model.Server, next model.Settings) error {
+	cur, err := s.LoadDomain(d)
+	if err != nil {
+		return err
+	}
+	if err := model.CheckClientChange(srv, cur, next); err != nil {
+		return err
+	}
+	return s.SaveDomain(d, next)
+}
+
 // InitExistingSites is for the first installation on a server without
 // Cpnginx: every listed site that already works gets proxy mode (M-5,
 // I-5). A domain that already has a mode keeps it, so running it twice is
 // harmless. It continues after an error with one domain (N-4) and returns
 // the number of files written and all errors joined.
-func (s *Store) InitExistingSites(domains []model.Domain) (written int, err error) {
+//
+// It refuses to run while the mode is locked on the server: the domain
+// layers would be ignored and existing sites would get the server mode.
+func (s *Store) InitExistingSites(srv model.Server, domains []model.Domain) (written int, err error) {
+	if a := srv.AccessFor(model.FieldMode); a != model.AccessAdmin && a != model.AccessClient {
+		return 0, fmt.Errorf("%w: mode access is %q; existing sites would not get proxy mode", model.ErrNotPermitted, a)
+	}
 	var errs []error
 	for _, d := range domains {
 		cur, err := s.LoadDomain(d)
@@ -275,7 +300,7 @@ func (s *Store) ListUsers() ([]model.User, error) {
 	for _, n := range names {
 		u := model.User(n)
 		if err := u.Validate(); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", filepath.Join(s.users, n), err))
+			errs = append(errs, fmt.Errorf("%s: %w", s.users, err)) // err quotes the name
 			continue
 		}
 		out = append(out, u)
@@ -295,7 +320,7 @@ func (s *Store) ListDomains() ([]model.Domain, error) {
 	for _, n := range names {
 		d := model.Domain(n)
 		if err := d.Validate(); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", filepath.Join(s.domains, n), err))
+			errs = append(errs, fmt.Errorf("%s: %w", s.domains, err)) // err quotes the name
 			continue
 		}
 		out = append(out, d)
@@ -354,9 +379,9 @@ func listDir(dir string) ([]string, error) {
 }
 
 // readFile reads a settings file that must be a regular file no larger
-// than model.MaxFileSize. Symlinks are refused (O_NOFOLLOW) and the type
-// is checked before opening, so a FIFO or device cannot block or feed
-// the reader.
+// than model.MaxFileSize. Symlinks are refused (O_NOFOLLOW); the type is
+// checked before opening for a clear error and again on the open file,
+// and O_NONBLOCK keeps a FIFO swapped in between from blocking the open.
 func readFile(path string) ([]byte, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
@@ -365,11 +390,16 @@ func readFile(path string) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s: %w: not a regular file", path, model.ErrInvalid)
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- path is built from a validated name
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0) // #nosec G304 -- path is built from a validated name
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil {
+		return nil, err
+	} else if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w: not a regular file", path, model.ErrInvalid)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, model.MaxFileSize+1))
 	if err != nil {
 		return nil, err

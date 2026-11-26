@@ -287,3 +287,74 @@ func BenchmarkResolve(b *testing.B) {
 		_ = Resolve(srv, user, dom)
 	}
 }
+
+// TestInvalidAccessFailsClosed_U1: an access value that skipped Validate
+// must not unlock lower layers, and Resolve and CheckClientChange agree.
+func TestInvalidAccessFailsClosed_U1(t *testing.T) {
+	srv := Server{Access: map[Field]Access{FieldCache: "Locked", FieldMode: ""}}
+	got := Resolve(srv, Settings{Cache: ptr(true)}, Settings{Cache: ptr(true), Mode: ptr(ModeProxy)})
+	if got.Cache.Value || got.Cache.From != LayerBuiltin {
+		t.Fatalf("invalid access unlocked cache: %+v", got.Cache)
+	}
+	if got.Mode.From != LayerBuiltin {
+		t.Fatalf("empty access unlocked mode: %+v", got.Mode)
+	}
+	if err := CheckClientChange(srv, Settings{}, Settings{Cache: ptr(true)}); !errors.Is(err, ErrNotPermitted) {
+		t.Fatalf("client change allowed: %v", err)
+	}
+}
+
+// TestClientCannotUnfreezeMode_M4: removing the stamped mode would make the
+// domain follow later default changes, so the client may only replace it.
+func TestClientCannotUnfreezeMode_M4(t *testing.T) {
+	srv := Server{}
+	cur := NewDomainSettings(srv, Settings{})
+	if err := CheckClientChange(srv, cur, Settings{}); !errors.Is(err, ErrNotPermitted) {
+		t.Fatalf("mode removal accepted: %v", err)
+	}
+	if err := CheckClientChange(srv, cur, Settings{Mode: ptr(ModeHybrid)}); err != nil {
+		t.Fatalf("mode replacement refused: %v", err)
+	}
+	// A later admin change of the default does not touch the domain.
+	srv.Defaults.Mode = ptr(ModeProxy)
+	if m := Resolve(srv, Settings{Mode: ptr(ModeHybrid)}, cur).Mode; m.Value != ModeNginx || m.From != LayerDomain {
+		t.Fatalf("existing domain switched: %+v", m)
+	}
+}
+
+func FuzzParseNames(f *testing.F) {
+	for _, s := range []string{"bob", "ea-php83", "8.3", "a.-b", "wordpress", "none", "\xff", ""} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		check := func(name string, ok bool, err error) {
+			if err != nil && !errors.Is(err, ErrInvalid) {
+				t.Fatalf("%s: error does not wrap ErrInvalid: %v", name, err)
+			}
+			if err != nil && strings.ContainsAny(err.Error(), "\n\r\x00") {
+				t.Fatalf("%s: raw control character in error %q", name, err)
+			}
+			if !ok {
+				return
+			}
+			for i := 0; i < len(s); i++ {
+				c := s[i]
+				if !isLower(c) && !isDigit(c) && !strings.ContainsRune("._-", rune(c)) {
+					t.Fatalf("%s: unsafe byte %q accepted in %q", name, c, s)
+				}
+			}
+			if strings.Contains(s, "..") || strings.HasPrefix(s, ".") || strings.HasPrefix(s, "-") {
+				t.Fatalf("%s: unsafe form accepted: %q", name, s)
+			}
+		}
+		_, err := ParseUser(s)
+		check("user", err == nil, err)
+		_, err = ParsePHPVersion(s)
+		check("php", err == nil, err)
+		_, err = ParseTemplateName(s)
+		check("template", err == nil, err)
+		if err == nil && strings.Contains(s, ".") {
+			t.Fatalf("template with dot accepted: %q", s)
+		}
+	})
+}
