@@ -35,6 +35,12 @@ MODULE="$PREFIX/nginx/modules/ngx_http_modsecurity_module.so"
 CONF="/etc/$PRODUCT/nginx/nginx.conf"
 
 FAILED=0
+# EL10 has no YAJL (see build.sh); everywhere else JSON parsing must work.
+EXPECT_JSON=1
+# shellcheck disable=SC1091
+case "$(. /etc/os-release && echo "${ID:-}:${VERSION_ID:-}")" in
+almalinux:10* | cloudlinux:10*) EXPECT_JSON=0 ;;
+esac
 pass() { printf 'PASS: %s\n' "$*"; }
 fail() { printf 'FAIL: %s\n' "$*"; FAILED=1; }
 
@@ -160,7 +166,10 @@ $(common_http)
     # 406, a status nothing else in this config produces.
     modsecurity_rules '
         SecRuleEngine On
+        SecRequestBodyAccess On
         SecRule ARGS:probe "@streq attack" "id:1000001,phase:1,deny,status:406,log"
+        SecRule REQUEST_HEADERS:Content-Type "@beginsWith application/json" "id:1000002,phase:1,pass,nolog,ctl:requestBodyProcessor=JSON"
+        SecRule ARGS:json.probe "@streq attack" "id:1000003,phase:2,deny,status:406,log"
     ';
     server {
         listen 127.0.0.1:18080;
@@ -214,6 +223,23 @@ if OUT="$("$NGINX" -c "$TMP/run.conf" 2>&1)"; then
 		pass "ModSecurity passes a clean request: HTTP $code"
 	else
 		fail "clean request returned HTTP $code, want 200"
+	fi
+	# JSON request bodies are parsed only when libmodsecurity has YAJL,
+	# which EL10 does not ship (build.sh builds without it there).
+	code="$(http_code -X POST -H 'Content-Type: application/json' \
+		--data '{"probe":"attack"}' 'http://127.0.0.1:18081/')"
+	if [ "$EXPECT_JSON" = 1 ]; then
+		if [ "$code" = 406 ]; then
+			pass "ModSecurity inspects JSON request bodies: HTTP $code"
+		else
+			fail "JSON body with a matching value returned HTTP $code, want 406"
+		fi
+	else
+		if [ "$code" = 406 ]; then
+			fail "JSON body blocked although this OS has no YAJL; update smoke-test.sh"
+		else
+			printf 'NOTE: no YAJL on this OS: JSON request bodies are not inspected (HTTP %s)\n' "$code"
+		fi
 	fi
 	ver="$(curl -sk --http2 -o /dev/null -w '%{http_version} %{http_code}' https://127.0.0.1:18443/ || true)"
 	if [ "$ver" = "2 200" ]; then

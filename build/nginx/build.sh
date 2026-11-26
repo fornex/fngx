@@ -112,6 +112,10 @@ fi
 # --- OS detection -----------------------------------------------------------
 
 OS_FAMILY=""
+# YAJL gives libmodsecurity its JSON request body parser. RHEL 10 and
+# EPEL 10 do not ship it, so on EL10 libmodsecurity is built without it.
+# See docs/build.md, "YAJL on EL10".
+WITH_YAJL=1
 
 detect_os() {
 	[ -r /etc/os-release ] || die "/etc/os-release not found"
@@ -122,7 +126,8 @@ detect_os() {
 	version_id="$(. /etc/os-release && echo "${VERSION_ID:-}")"
 	case "$id:$version_id" in
 	almalinux:8* | almalinux:9* | almalinux:10* | cloudlinux:8* | cloudlinux:9* | cloudlinux:10*)
-		OS_FAMILY=el ;;
+		OS_FAMILY=el
+		case "$version_id" in 10*) WITH_YAJL=0 ;; esac ;;
 	ubuntu:22.04 | ubuntu:24.04)
 		OS_FAMILY=deb ;;
 	*)
@@ -136,13 +141,16 @@ detect_os() {
 install_deps_el() {
 	# yajl-devel is in the CRB repository (PowerTools on EL8). It is
 	# enabled for this transaction only; the system repo setup is unchanged.
-	local repos=() r
+	local repos=() r yajl=()
+	if [ "$WITH_YAJL" = 1 ]; then
+		yajl=(yajl-devel)
+	fi
 	while read -r r; do
 		repos+=("--enablerepo=$r")
 	done < <(dnf -q repolist --all 2>/dev/null |
 		awk 'NR > 1 { print $1 }' |
 		grep -i -E '(^|[-_])(crb|powertools)$' || true)
-	if [ "${#repos[@]}" -eq 0 ]; then
+	if [ "${#repos[@]}" -eq 0 ] && [ "$WITH_YAJL" = 1 ]; then
 		log "warning: no CRB/PowerTools repository found; yajl-devel may be missing"
 	fi
 	# /usr/bin/curl is requested by path: EL9+ images ship curl-minimal,
@@ -150,7 +158,7 @@ install_deps_el() {
 	dnf -y "${repos[@]}" install \
 		gcc gcc-c++ make perl pkgconf-pkg-config \
 		tar gzip gnupg2 /usr/bin/curl ca-certificates findutils diffutils openssl \
-		pcre2-devel zlib-devel libxml2-devel yajl-devel
+		pcre2-devel zlib-devel libxml2-devel "${yajl[@]}"
 }
 
 install_deps_deb() {
@@ -240,6 +248,11 @@ LD_OPT="-Wl,-z,relro -Wl,-z,now -pie"
 build_modsecurity() {
 	log "building libmodsecurity $MODSECURITY_VERSION"
 	cd "$SRC/modsecurity-v$MODSECURITY_VERSION"
+	local yajl_opt=--with-yajl
+	if [ "$WITH_YAJL" = 0 ]; then
+		yajl_opt=--without-yajl
+		log "warning: building libmodsecurity without YAJL: JSON request bodies are not parsed (docs/build.md)"
+	fi
 	# Optional features (remote rules, GeoIP, LMDB, Lua, ssdeep) are off:
 	# fewer dependencies, smaller attack surface. See docs/build.md.
 	./configure \
@@ -248,7 +261,7 @@ build_modsecurity() {
 		--disable-examples \
 		--disable-doxygen-doc \
 		--with-pcre2 \
-		--with-yajl \
+		"$yajl_opt" \
 		--with-libxml \
 		--without-curl \
 		--without-geoip \
