@@ -27,12 +27,29 @@ jobs:
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - name: Vet
         run: go vet ./...
-      # The apply integration tests run the real "nginx -t" and reload.
+      # The apply and render integration tests run the real nginx. The
+      # render templates need nginx 1.25.1+ ("http2" directive) and HTTP/3,
+      # which Ubuntu 24.04's nginx 1.24 lacks, so nginx comes from the
+      # nginx.org stable repository, set up as described on
+      # https://nginx.org/en/linux_packages.html#Ubuntu (key fingerprint
+      # checked against the one published there).
       - name: Install nginx
-        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends nginx
+        run: |
+          set -eu
+          curl -fsSL https://nginx.org/keys/nginx_signing.key -o "$RUNNER_TEMP/nginx_signing.key"
+          gpg --show-keys --with-colons "$RUNNER_TEMP/nginx_signing.key" \
+            | grep -q '^fpr:::::::::573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62:$'
+          gpg --dearmor < "$RUNNER_TEMP/nginx_signing.key" \
+            | sudo tee /usr/share/keyrings/nginx-archive-keyring.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] https://nginx.org/packages/ubuntu $(lsb_release -cs) nginx" \
+            | sudo tee /etc/apt/sources.list.d/nginx.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends nginx
+          /usr/sbin/nginx -V
       - name: Test
         env:
           NGINX_TEST_REQUIRED: "1"
+          NGINX_TEST_REQUIRE_HTTP3: "1"
           NGINX_TEST_BINARY: /usr/sbin/nginx
         run: go test -race -count=1 ./...
       - name: Build for Linux x86_64

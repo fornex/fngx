@@ -1,0 +1,69 @@
+{{- /*
+Helper templates shared by the vhost templates. Custom templates may use them
+too. Each is called with a ServerData value (one server block).
+
+Directive references:
+  listen, server_name, root, location, try_files, disable_symlinks:
+    https://nginx.org/en/docs/http/ngx_http_core_module.html
+  http2: https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2
+  quic, Alt-Svc: https://nginx.org/en/docs/quic.html and
+    https://nginx.org/en/docs/http/ngx_http_v3_module.html#example
+  ssl_certificate: https://nginx.org/en/docs/http/ngx_http_ssl_module.html
+  proxy_pass, proxy_ssl_*: https://nginx.org/en/docs/http/ngx_http_proxy_module.html
+*/ -}}
+
+{{- define "listen"}}
+{{- $tls := .TLS}}
+{{- range .Listen}}
+    listen {{.}}{{if $tls}} ssl{{end}};
+{{- end}}
+{{- range .QUIC}}
+    listen {{.}} quic;
+{{- end}}
+{{- end}}
+
+{{- define "tls"}}
+{{- if .TLS}}
+    ssl_certificate {{.Cert}};
+    ssl_certificate_key {{.Key}};
+{{- if .HTTP2}}
+    http2 on;
+{{- end}}
+{{- with .AltSvc}}
+    add_header Alt-Svc {{.}};
+{{- end}}
+{{- end}}
+{{- end}}
+
+{{- /*
+Admin and client include files (T-6, T-7), in this order:
+  1. admin rewrite rules: server-level rewrite directives run in the order
+     they appear, so the admin's run before the client's;
+  2. admin includes: allow/deny placed here are checked before the client's,
+     since access rules are checked in order until the first match;
+  3. client rules.
+The template's own regex locations that the client must not shadow come
+before this block; the ones the client may refine come after it, because
+regex locations are checked in order of appearance.
+*/ -}}
+{{- define "includes"}}
+{{- with .AdminRewrite}}
+    include {{.}};
+{{- end}}
+{{- with .AdminInclude}}
+    include {{.}};
+{{- end}}
+{{- with .ClientRules}}
+    include {{.}};
+{{- end}}
+{{- end}}
+
+{{- /* Body of a location that passes the request to Apache (M-6). */ -}}
+{{- define "proxy"}}
+        proxy_pass {{.Backend}};
+        include snippets/proxy.conf;
+{{- if .BackendTLS}}
+        proxy_ssl_server_name on;
+        proxy_ssl_name $host;
+{{- end}}
+{{- end}}
