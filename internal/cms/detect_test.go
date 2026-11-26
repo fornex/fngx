@@ -3,10 +3,12 @@
 package cms
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -331,8 +333,8 @@ func TestDetect_BadDocroot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range []string{"", "relative/dir", file, filepath.Join(file, "x"), "/nonexistent-" + t.Name()} {
-		if _, err := Detect(p, me); err == nil {
-			t.Errorf("Detect(%q) succeeded", p)
+		if _, err := Detect(p, me); !errors.Is(err, ErrUnavailable) {
+			t.Errorf("Detect(%q) = %v, want ErrUnavailable", p, err)
 		}
 	}
 }
@@ -358,8 +360,8 @@ func TestDetectUnder_N6(t *testing.T) {
 		t.Errorf("Suggestion = %+v, %v; want WordPress", c, ok)
 	}
 	for _, rel := range []string{"public_html/evil", "www/blog", "public_html/../public_html/blog", "/public_html", "public_html//blog", "./public_html"} {
-		if _, err := DetectUnder(home, rel, me); err == nil {
-			t.Errorf("DetectUnder(%q) succeeded", rel)
+		if _, err := DetectUnder(home, rel, me); !errors.Is(err, ErrUnavailable) {
+			t.Errorf("DetectUnder(%q) = %v, want ErrUnavailable", rel, err)
 		}
 	}
 	if _, err := DetectUnder("relative", "x", me); err == nil {
@@ -715,6 +717,28 @@ func TestDetect_N6_ForeignOwnedEntries(t *testing.T) {
 		t.Errorf("ignored = %+v, want wp-includes", r.Ignored)
 	}
 
+	// Directories and files of another user (the web server user after
+	// a mod_php install) that everyone may search or read are used:
+	// the client could look at them anyway.
+	root = fixtureDir(t, "joomla4")
+	for _, p := range []string{"administrator", "includes", "libraries"} {
+		chown(filepath.Join(root, p))
+		if err := os.Chmod(filepath.Join(root, p), 0o755); err != nil { //nolint:gosec // world-searchable on purpose
+			t.Fatal(err)
+		}
+	}
+	if c, ok := detect(t, root).Suggestion(); !ok || c.App != Joomla || c.Confidence != High {
+		t.Errorf("Joomla with world-searchable foreign directories: %+v, %v", c, ok)
+	}
+	root = fixtureDir(t, "laravel-public")
+	chown(filepath.Join(root, "index.php"))
+	if err := os.Chmod(filepath.Join(root, "index.php"), 0o644); err != nil { //nolint:gosec // world-readable on purpose
+		t.Fatal(err)
+	}
+	if c, ok := detect(t, root).Suggestion(); !ok || c.App != Laravel {
+		t.Errorf("Laravel with a world-readable foreign index.php: %+v, %v", c, ok)
+	}
+
 	// The same through DetectUnder: a foreign component is refused.
 	home := t.TempDir()
 	build(t, home, fx{"public_html/stolen/index.php": laravelIndex})
@@ -740,11 +764,17 @@ func TestDetect_N6_DeviceSwappedAfterStat(t *testing.T) {
 	if err := os.Remove(p); err != nil {
 		t.Fatal(err)
 	}
-	if err := unix.Mknod(p, unix.S_IFCHR|0o600, int(unix.Mkdev(1, 5))); err != nil { //nolint:gosec // 1:5 is /dev/zero, fits in int
+	// Major 240 is reserved for local use and normally unregistered, so
+	// opening the node fails with ENXIO. The reason must be the type
+	// check, which proves the device was never opened (Linux, O_PATH).
+	if err := unix.Mknod(p, unix.S_IFCHR|0o666, int(unix.Mkdev(240, 0))); err != nil { //nolint:gosec // small constant
 		t.Skipf("mknod: %v", err)
 	}
 	if b := tr.readPrefix("index.html", indexHTMLLimit); b != nil {
 		t.Errorf("read %d bytes from a device", len(b))
+	}
+	if runtime.GOOS == "linux" && !slices.ContainsFunc(tr.ignored, func(i Ignored) bool { return i.Reason == errChanged.Error() }) {
+		t.Errorf("ignored = %+v, want %q (device must not be opened)", tr.ignored, errChanged)
 	}
 }
 

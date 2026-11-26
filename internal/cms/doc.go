@@ -18,10 +18,14 @@
 // and may change them while detection runs. The package therefore:
 //
 //   - takes the site owner's uid from the caller (the system user
-//     database), never from the tree: the document root and every
-//     directory it enters must be owned by that uid, and only files owned
-//     by it are read. A hard link to root's or another user's file, or
-//     another user's directory moved into the client's tree, is skipped;
+//     database), never from the tree: the document root must be owned by
+//     that uid; below it, a directory is entered and a file is read only
+//     if the uid owns it or everyone may search or read it, so detection
+//     sees nothing the client could not. A hard link to root's or another
+//     user's private file, or another user's private directory moved into
+//     the client's tree, is skipped;
+//   - wraps every error in ErrUnavailable; the details are for the
+//     server log, not for the client;
 //   - never follows symbolic links: the document root must be a clean
 //     path (a trailing "/" or "/." would make the kernel follow a final
 //     symlink despite O_NOFOLLOW) and is opened with O_NOFOLLOW; every

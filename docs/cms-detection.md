@@ -66,8 +66,20 @@ Drupal project root used as the document root gets a hint to serve
 Detection runs as root over client-owned trees, so it:
 
 - takes the site owner's uid from the caller (the system user
-  database), never from the tree; the document root and every directory
-  entered must be owned by it, and only files owned by it are read;
+  database), never from the tree. The document root (and, for
+  `DetectUnder`, every component leading to it) must be owned by it.
+  Below the document root a directory is entered and a file is read only
+  if the owner owns it or the "other" permission bits let everyone search
+  or read it, that is, only what the client could look at anyway. So
+  sites whose files belong to the web server user are still detected,
+  while a hard link to a private file of root or another user, or
+  another user's private directory moved into the client's tree, is
+  skipped. Assumption: no ACL or LSM rule denies the client what the
+  "other" bits grant;
+- wraps every error in `cms.ErrUnavailable`. The detailed message ("does
+  not exist", "owner differs") is for the server log only; clients must
+  see only the generic text, or a misused `Detect` would tell them
+  whether paths they cannot see exist;
 - accepts only clean document root paths: a trailing `/` or `/.` would
   make the kernel follow a final symlink despite `O_NOFOLLOW`;
 - opens the document root with `O_NOFOLLOW` and walks below it only with
@@ -82,7 +94,7 @@ Detection runs as root over client-owned trees, so it:
   current rules (83 on a tree that has every marker), hard limit 128; no
   directory listing, no recursion;
 - reads only `index.php` (8 KiB) and `index.html` (16 KiB) prefixes, only
-  regular files owned by the site owner; on Linux the file is opened with
+  regular files allowed by the rule above; on Linux the file is opened with
   `O_PATH` first (no open routine runs, so a FIFO or device is never
   opened for reading), checked with `fstat` against the earlier
   `fstatat` (type, owner, device, inode), then reopened through
@@ -110,7 +122,7 @@ WordPress, the rest spread over all fixtures), warm page cache:
 
 | Platform | Per site | 10,000 sites |
 | --- | --- | --- |
-| Linux x86_64 (container) | 45 µs | 0.45 s |
+| Linux x86_64 (container) | 22-45 µs (varies between runs) | 0.2-0.45 s |
 | macOS (development machine) | 72 µs | 0.7 s |
 
 A cold cache adds disk seeks for each probed directory; at most a few

@@ -91,43 +91,43 @@ const (
 // and DetectUnder).
 func openTree(docroot string, owner uint32) (*tree, error) {
 	if docroot == "" || docroot[0] != '/' {
-		return nil, fmt.Errorf("document root %q: must be an absolute path", docroot)
+		return nil, fmt.Errorf("%w: document root %q: must be an absolute path", ErrUnavailable, docroot)
 	}
 	// A trailing "/" or "/." makes the kernel resolve the last name as
 	// a directory and follow a symlink there despite O_NOFOLLOW, so
 	// only clean paths are accepted.
 	if path.Clean(docroot) != docroot || docroot == "/" {
-		return nil, fmt.Errorf("document root %q: must be a clean path (no trailing slash, \".\" or \"..\")", docroot)
+		return nil, fmt.Errorf("%w: document root %q: must be a clean path (no trailing slash, \".\" or \"..\")", ErrUnavailable, docroot)
 	}
 	fd, err := openRetry(unix.AT_FDCWD, docroot, dirFlags)
 	if err != nil {
-		return nil, fmt.Errorf("document root %q: %w", docroot, describe(err))
+		return nil, fmt.Errorf("%w: document root %q: %w", ErrUnavailable, docroot, describe(err))
 	}
 	if err := checkDir(fd, owner); err != nil {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("document root %q: %w", docroot, err)
+		return nil, fmt.Errorf("%w: document root %q: %w", ErrUnavailable, docroot, err)
 	}
 	return newTree(fd, owner), nil
 }
 
 // openTreeUnder opens base, which the caller trusts, and then walks rel
-// one component at a time without following symlinks. Every component
-// of rel must be a directory owned by owner.
+// one component at a time without following symlinks. base and every
+// component of rel must be directories owned by owner.
 func openTreeUnder(base, rel string, owner uint32) (*tree, error) {
 	if base == "" || base[0] != '/' {
-		return nil, fmt.Errorf("base %q: must be an absolute path", base)
+		return nil, fmt.Errorf("%w: base %q: must be an absolute path", ErrUnavailable, base)
 	}
 	parts, err := splitRel(rel)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	fd, err := openRetry(unix.AT_FDCWD, base, dirFlags&^unix.O_NOFOLLOW)
 	if err != nil {
-		return nil, fmt.Errorf("base %q: %w", base, describe(err))
+		return nil, fmt.Errorf("%w: base %q: %w", ErrUnavailable, base, describe(err))
 	}
 	if err := checkDir(fd, owner); err != nil {
 		_ = unix.Close(fd)
-		return nil, fmt.Errorf("base %q: %w", base, err)
+		return nil, fmt.Errorf("%w: base %q: %w", ErrUnavailable, base, err)
 	}
 	for i, p := range parts {
 		next, err := openRetry(fd, p, dirFlags)
@@ -138,19 +138,27 @@ func openTreeUnder(base, rel string, owner uint32) (*tree, error) {
 			}
 		}
 		if err != nil {
-			return nil, fmt.Errorf("document root %q: component %q: %w", rel, strings.Join(parts[:i+1], "/"), describe(err))
+			return nil, fmt.Errorf("%w: document root %q: component %q: %w", ErrUnavailable, rel, strings.Join(parts[:i+1], "/"), describe(err))
 		}
 		fd = next
 	}
 	return newTree(fd, owner), nil
 }
 
+// ErrUnavailable is wrapped by every error from Detect and DetectUnder.
+// The rest of the message names what failed and how ("does not exist",
+// "owner differs", "symbolic link"), which is for the server log only:
+// shown to a client it would tell whether paths the client cannot see
+// exist. Show clients ErrUnavailable's text instead.
+var ErrUnavailable = errors.New("document root unavailable")
+
 var (
 	errOwner   = errors.New("owner differs from the site owner")
 	errChanged = errors.New("changed while being checked, not read")
 )
 
-// checkDir verifies that fd is a directory owned by owner.
+// checkDir verifies that fd is a directory owned by owner. It is used
+// for the document root and the components leading to it.
 func checkDir(fd int, owner uint32) error {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
@@ -193,7 +201,7 @@ func splitRel(rel string) ([]string, error) {
 	parts := strings.Split(rel, "/")
 	for _, p := range parts {
 		if p == "" || p == "." || p == ".." || strings.IndexByte(p, 0) >= 0 {
-			return nil, fmt.Errorf("relative path %q: empty, \".\" or \"..\" component", rel)
+			return nil, fmt.Errorf("%w: relative path %q: empty, \".\" or \"..\" component", ErrUnavailable, rel)
 		}
 	}
 	return parts, nil
@@ -239,7 +247,7 @@ func (t *tree) dir(rel string) (int, error) {
 	fd, err := openRetry(pfd, name, dirFlags)
 	if err == nil {
 		if err = t.spend(); err == nil {
-			err = checkDir(fd, t.owner)
+			err = checkSubdir(fd, t.owner)
 		}
 		if err != nil {
 			_ = unix.Close(fd)
@@ -338,8 +346,8 @@ func (t *tree) readUncached(rel string, limit int) []byte {
 	if pre.k != kindFile {
 		return nil
 	}
-	if pre.st.Uid != t.owner {
-		t.ignore(rel, errOwner.Error()+", not read")
+	if !mayRead(&pre.st, t.owner) {
+		t.ignore(rel, errOwner.Error()+" and the file is not world-readable, not read")
 		return nil
 	}
 	parent, name := "", rel
@@ -357,7 +365,7 @@ func (t *tree) readUncached(rel string, limit int) []byte {
 	}
 	t.ops += 2
 	fd, err := openRegular(pfd, name, func(st *unix.Stat_t) error {
-		if kindOf(st.Mode) != kindFile || st.Dev != pre.st.Dev || st.Ino != pre.st.Ino || st.Uid != t.owner {
+		if kindOf(st.Mode) != kindFile || st.Dev != pre.st.Dev || st.Ino != pre.st.Ino || !mayRead(st, t.owner) {
 			return errChanged
 		}
 		return nil
@@ -438,4 +446,35 @@ func fstatCheck(fd int, check func(*unix.Stat_t) error) error {
 		return err
 	}
 	return check(&st)
+}
+
+// Below the document root, an entry may be used if the site owner owns
+// it or if the "other" permission bits grant the access to everyone:
+// then the client could look at it anyway, so detection reveals nothing
+// new. This keeps sites detectable whose directories or files belong to
+// the web server user (mod_php installers, restores), while a foreign
+// directory the client cannot search or a foreign file it cannot read
+// (a hard link to root's or another user's private file, or another
+// user's directory moved into the client's tree) is skipped.
+// ASSUMPTION: no ACL or LSM rule denies the client what the "other" bits
+// grant; such a rule could only make detection see more than the client.
+
+// checkSubdir verifies that fd is a directory the site owner may search.
+func checkSubdir(fd int, owner uint32) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if kindOf(st.Mode) != kindDir {
+		return errors.New("not a directory")
+	}
+	if st.Uid != owner && st.Mode&0o001 == 0 {
+		return errOwner
+	}
+	return nil
+}
+
+// mayRead reports whether the site owner may read the file st describes.
+func mayRead(st *unix.Stat_t, owner uint32) bool {
+	return st.Uid == owner || st.Mode&0o004 != 0
 }

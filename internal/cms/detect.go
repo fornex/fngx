@@ -80,10 +80,11 @@ func (r Result) Suggestion() (c Candidate, ok bool) {
 // It never modifies anything.
 //
 // owner is the uid of the site owner, taken from the system user
-// database, not from the file system. The document root and every
-// directory entered must be owned by it, and only files owned by it are
-// read; anything else is skipped, so a client cannot make detection look
-// at another user's or root's files.
+// database, not from the file system. The document root must be owned
+// by it. Below it, directories and files are used only if owner owns
+// them or everyone may search or read them; anything else is skipped,
+// so a client cannot make detection look at another user's or root's
+// private files.
 //
 // docroot must be an absolute, clean path (no trailing slash, "." or
 // ".."). Its last component must be a directory, not a symlink. The
@@ -92,7 +93,7 @@ func (r Result) Suggestion() (c Candidate, ok bool) {
 // client's home directory use DetectUnder.
 //
 // The error is non-nil only when the document root cannot be opened or
-// is not owned by owner.
+// is not owned by owner. It wraps ErrUnavailable; show clients only that.
 func Detect(docroot string, owner uint32) (Result, error) {
 	t, err := openTree(docroot, owner)
 	if err != nil {
