@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 // Package product holds the product name and build metadata.
 //
 // The name is a working title and may change before the first public
