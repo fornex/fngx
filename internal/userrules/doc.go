@@ -10,6 +10,10 @@
 // raw client text reaches the configuration. The final `nginx -t` check (T-9)
 // is done by the caller.
 //
+// Location blocks are allowed only for domains in nginx mode (T-8). The
+// Validator does not know the domain's mode; callers use
+// [Rules.CheckNoLocation] for domains in proxy or hybrid mode.
+//
 // # Syntax
 //
 // The accepted syntax is a strict subset of the nginx configuration syntax:

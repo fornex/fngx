@@ -454,6 +454,14 @@ func (d *Domain) Validate(s *Server) error {
 		}
 	}
 	add(checkClientRules(d.Client))
+	if mode != model.ModeNginx {
+		// Last line of defense: rules accepted while the domain was in
+		// nginx mode must not render once it is switched to proxy or
+		// hybrid (T-8, customer decision 26).
+		if err := d.Client.CheckNoLocation(); err != nil {
+			add(fmt.Errorf("client rules in %s mode: %w", mode, err))
+		}
+	}
 	add(checkAdminText("admin HTTP rewrite", d.Admin.HTTPRewrite))
 	add(checkAdminText("admin HTTP include", d.Admin.HTTPInclude))
 	add(checkAdminText("admin HTTPS rewrite", d.Admin.HTTPSRewrite))

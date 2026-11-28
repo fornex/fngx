@@ -136,10 +136,11 @@ Prefix and exact locations do not depend on order. So:
 
 - a client or admin location cannot expose hidden files in hybrid and nginx
   mode (see above);
-- a client regex location comes before the template's `\.php$` and static
-  extension locations, so the client can refine them for own paths, for
-  example add `expires` for images. Shadowing them affects only the client's
-  own site (assumption 5 of the client rules);
+- a client regex location (nginx mode only) comes before the template's
+  `\.php$` location, so the client can refine it for own paths. Shadowing it
+  affects only the client's own site (assumption 5 of the client rules). An
+  admin regex location also comes before the static extension location of
+  hybrid mode, for example to add `expires` for images;
 - a client `location /` (or `location ^~ /`) would duplicate the template's
   `location /`, which nginx rejects; the generator refuses such client rules
   with a clear error instead of letting the domain's `nginx -t` fail.
@@ -160,13 +161,29 @@ Things to know when writing rules:
 - `.htaccess` has no effect on what nginx serves in hybrid and nginx mode
   (M-8). Directories protected by `.htaccess` (for example cPanel Directory
   Privacy) are not protected for files nginx serves itself.
-- **In proxy and hybrid mode a client location serves files from disk.** The
-  client whitelist has no `proxy_pass`, so a client location such as
-  `location /app/ { expires 1h; }` makes nginx answer requests under `/app/`
-  from the document root instead of passing them to Apache: PHP files there
-  are sent as source, and `.htaccess` rules do not apply. This affects only
-  the client's own site; how to handle it (refuse locations for these modes,
-  or add a fallback to Apache) is an open question.
+- **Client `location` blocks are allowed only in nginx mode** (T-8, customer
+  decision). In proxy and hybrid mode a client may use only simple
+  directives (`rewrite`, `return`, `add_header`, `expires`, `allow`, `deny`
+  and the administrator's additions). The reason: the client whitelist has no
+  `proxy_pass`, so a client location such as `location /app/ { expires 1h; }`
+  would make nginx answer requests under `/app/` from the document root
+  instead of passing them to Apache, sending PHP files as source and ignoring
+  `.htaccess`. `userrules.Rules.CheckNoLocation` reports the first location
+  block with a message for the client; the generator runs it for every
+  domain outside nginx mode and refuses to render the domain, naming the
+  domain and its mode, so rules accepted in nginx mode cannot reach a domain
+  that was later switched to proxy or hybrid.
+- **Requirement for the mode switch (U-9, not implemented yet):** switching a
+  domain to proxy or hybrid mode must be refused, with the same message,
+  while its client rules contain a `location` block; the client removes the
+  blocks first. Accepting or editing client rules for a proxy or hybrid
+  domain must run the same check.
+- **Admin locations (T-6) in proxy and hybrid mode are not restricted.** An
+  admin include with a location that does not pass the request to Apache
+  (`proxy_pass` with `snippets/proxy.conf`, see above) has the same effect:
+  nginx serves that path from disk, PHP is sent as source and `.htaccess` does
+  not apply. This is a warning for the administrator, who is trusted to write
+  such locations deliberately.
 - Client rules apply to both the HTTP and the HTTPS server; a client
   `return 301 https://...` without a scheme check loops on HTTPS.
 

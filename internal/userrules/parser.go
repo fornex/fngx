@@ -41,6 +41,44 @@ func (v *Validator) Validate(src []byte) (*Rules, error) {
 	return &Rules{Directives: list}, nil
 }
 
+// CheckNoLocation returns an *Error at the first location block, or nil if
+// the rules have none (T-8, customer decision 26). Location blocks are
+// allowed only for domains in nginx mode: the whitelist has no proxy_pass, so
+// in proxy and hybrid mode a client location would make nginx serve that
+// path from disk instead of passing it to Apache, sending PHP source and
+// ignoring .htaccess.
+//
+// The Validator does not know the domain's mode, and the mode can change
+// after the rules were accepted, so the caller runs this check whenever the
+// rules are accepted or rendered for a domain that is not in nginx mode, and
+// before switching a domain with rules to proxy or hybrid mode. A nil
+// receiver has no rules.
+func (r *Rules) CheckNoLocation() error {
+	if r == nil {
+		return nil
+	}
+	if d := firstLocation(r.Directives); d != nil {
+		return errAt(d.at(-1), "location blocks are available only in nginx mode; in proxy and hybrid mode use directives without location")
+	}
+	return nil
+}
+
+// firstLocation returns the first location in input order, searching
+// nested blocks too. Validate only produces locations at the top level or
+// inside another location, but Rules is an exported type that callers may
+// build themselves.
+func firstLocation(list []*Directive) *Directive {
+	for _, d := range list {
+		if d.Name == "location" {
+			return d
+		}
+		if l := firstLocation(d.Children); l != nil {
+			return l
+		}
+	}
+	return nil
+}
+
 type parser struct {
 	v       *Validator
 	lex     *lexer

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/netip"
@@ -190,6 +191,64 @@ func TestClientReservedLocation(t *testing.T) { // T-7, T-9
 	d.Client = rules
 	if _, err := r.Domain(&s, &d); err != nil {
 		t.Errorf("specific locations refused: %v", err)
+	}
+}
+
+// TestClientLocationMode checks that client location blocks render only in
+// nginx mode (T-7, T-8, customer decision 26): a domain whose rules were
+// accepted in nginx mode and later switched to proxy or hybrid must fail
+// instead of serving files from disk past Apache.
+func TestClientLocationMode(t *testing.T) {
+	r := newRenderer(t)
+	e := goldenEnv()
+	v, err := userrules.New(userrules.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	texts := map[string]bool{ // rules text -> has a location
+		"":                                   false,
+		"expires 1h;\nadd_header X-A b;\n":   false,
+		"rewrite ^/a$ /b permanent;\n":       false,
+		"location = /x { return 404; }\n":    true,
+		"deny all;\nlocation ~ \\.png$ {}\n": true,
+		"location /a/ {\n    location /a/b/ { expires 1h; }\n}\n": true,
+	}
+	for _, mode := range []model.Mode{model.ModeProxy, model.ModeHybrid, model.ModeNginx} {
+		for text, hasLocation := range texts {
+			rules, err := v.Validate([]byte(text))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, d := e.baseServer(), e.domain("example.com", mode)
+			d.Client = rules
+			_, err = r.Domain(&s, &d)
+			if !hasLocation || mode == model.ModeNginx {
+				if err != nil {
+					t.Errorf("%s, %q: %v", mode, text, err)
+				}
+				continue
+			}
+			want := fmt.Sprintf("render: domain %q: client rules in %s mode: line ", d.Name, mode)
+			var ue *userrules.Error
+			if err == nil || !strings.HasPrefix(err.Error(), want) || !errors.As(err, &ue) ||
+				!strings.Contains(ue.Reason, "only in nginx mode") {
+				t.Errorf("%s, %q: got %v, want prefix %q and a userrules.Error", mode, text, err, want)
+			}
+		}
+	}
+
+	// All fails only the affected domain.
+	s := e.baseServer()
+	bad := e.domain("bad.example", model.ModeHybrid)
+	bad.Client = clientRules(t)
+	good := e.domain("good.example", model.ModeProxy)
+	good.Client = clientSimpleRules(t)
+	res, err := r.All(&s, []Domain{bad, good})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Failed) != 1 || res.Failed[0].Domain != "bad.example" || len(res.Change.Units) != 1 || res.Change.Full {
+		t.Errorf("All: failed %v, units %d, full %v", res.Failed, len(res.Change.Units), res.Change.Full)
 	}
 }
 

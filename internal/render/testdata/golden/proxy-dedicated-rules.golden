@@ -1,16 +1,8 @@
 ### domains/shop.example.org/client.conf
-location = /teapot {
-    return 418;
-}
 add_header X-Client "yes it is";
 rewrite ^/old/(.*)$ /new/$1 permanent;
-location ~* \.png$ {
-    expires 30d;
-}
+expires 1h;
 deny 203.0.113.0/24;
-location ^~ /app/ {
-    expires 1h;
-}
 ### domains/shop.example.org/http-include.conf
 location = /admin-http { return 200 "admin http\n"; }
 deny 198.51.100.7;
