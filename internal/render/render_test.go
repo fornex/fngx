@@ -205,16 +205,20 @@ func TestClientLocationMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	texts := map[string]bool{ // rules text -> has a location
-		"":                                   false,
-		"expires 1h;\nadd_header X-A b;\n":   false,
-		"rewrite ^/a$ /b permanent;\n":       false,
-		"location = /x { return 404; }\n":    true,
-		"deny all;\nlocation ~ \\.png$ {}\n": true,
-		"location /a/ {\n    location /a/b/ { expires 1h; }\n}\n": true,
+	tests := []struct {
+		text        string
+		hasLocation bool
+	}{
+		{"", false},
+		{"expires 1h;\nadd_header X-A b;\n", false},
+		{"rewrite ^/a$ /b permanent;\n", false},
+		{"location = /x { return 404; }\n", true},
+		{"deny all;\nlocation ~ \\.png$ {}\n", true},
+		{"location /a/ {\n    location /a/b/ { expires 1h; }\n}\n", true},
 	}
 	for _, mode := range []model.Mode{model.ModeProxy, model.ModeHybrid, model.ModeNginx} {
-		for text, hasLocation := range texts {
+		for _, tt := range tests {
+			text, hasLocation := tt.text, tt.hasLocation
 			rules, err := v.Validate([]byte(text))
 			if err != nil {
 				t.Fatal(err)
@@ -237,8 +241,21 @@ func TestClientLocationMode(t *testing.T) {
 		}
 	}
 
+	// A reserved location outside nginx mode gets only the mode error, not
+	// the advice to use a more specific location.
+	reserved, err := v.Validate([]byte("location / { expires 1h; }"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, d := e.baseServer(), e.domain("example.com", model.ModeProxy)
+	d.Client = reserved
+	if _, err := r.Domain(&s, &d); err == nil || !strings.Contains(err.Error(), "only in nginx mode") ||
+		strings.Contains(err.Error(), "defined by the template") {
+		t.Errorf("reserved location in proxy mode: got %v", err)
+	}
+
 	// All fails only the affected domain.
-	s := e.baseServer()
+	s = e.baseServer()
 	bad := e.domain("bad.example", model.ModeHybrid)
 	bad.Client = clientRules(t)
 	good := e.domain("good.example", model.ModeProxy)
