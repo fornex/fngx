@@ -1,7 +1,8 @@
 {{- /*
 proxy mode (T-1): every request goes to Apache (section 5, M-6). nginx serves
-no files itself unless an admin or client rule adds a location that does;
-root and disable_symlinks keep such a location to the owner's own files
+no files itself unless an admin rule adds a location that does (client
+location blocks are refused outside nginx mode, T-8); root and
+disable_symlinks keep such a location to the owner's own files
 (Q-6): a symbolic link whose owner differs from its target's is not
 followed, in any component of the path, including the document root itself.
 Hidden files are not denied here, so that behaviour stays that of Apache.

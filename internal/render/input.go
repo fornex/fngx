@@ -169,7 +169,8 @@ type Domain struct {
 	// Admin holds the admin's own rewrite rules and includes (T-6).
 	Admin AdminRules
 	// Client holds the client's rules (T-7). Only text produced by
-	// userrules.Rules.Format reaches the configuration.
+	// userrules.Rules.Format reaches the configuration. Rules with location
+	// blocks are refused unless the domain is in nginx mode (T-8).
 	Client *userrules.Rules
 }
 
@@ -453,7 +454,16 @@ func (d *Domain) Validate(s *Server) error {
 			}
 		}
 	}
-	add(checkClientRules(d.Client))
+	if mode == model.ModeNginx {
+		add(checkClientRules(d.Client))
+	} else if err := d.Client.CheckNoLocation(); err != nil {
+		// Last line of defense: rules accepted while the domain was in
+		// nginx mode must not render once it is switched to proxy or
+		// hybrid (T-8, customer decision 26). Locations are refused as a
+		// whole here, so the reserved location check would only add a
+		// misleading second error.
+		add(fmt.Errorf("client rules in %s mode: %w", mode, err))
+	}
 	add(checkAdminText("admin HTTP rewrite", d.Admin.HTTPRewrite))
 	add(checkAdminText("admin HTTP include", d.Admin.HTTPInclude))
 	add(checkAdminText("admin HTTPS rewrite", d.Admin.HTTPSRewrite))

@@ -74,13 +74,33 @@ deny 203.0.113.0/24;
 location ^~ /app/ { expires 1h; }
 `
 
+// clientSimpleRulesText has no location blocks, which proxy and hybrid
+// domains do not allow (T-8, customer decision 26).
+const clientSimpleRulesText = `add_header X-Client "yes it is";
+rewrite ^/old/(.*)$ /new/$1 permanent;
+expires 1h;
+deny 203.0.113.0/24;
+`
+
+// clientRules returns clientRulesText, for nginx-mode domains.
 func clientRules(t testing.TB) *userrules.Rules {
+	t.Helper()
+	return parseClientRules(t, clientRulesText)
+}
+
+// clientSimpleRules returns clientSimpleRulesText, for any mode.
+func clientSimpleRules(t testing.TB) *userrules.Rules {
+	t.Helper()
+	return parseClientRules(t, clientSimpleRulesText)
+}
+
+func parseClientRules(t testing.TB, text string) *userrules.Rules {
 	t.Helper()
 	v, err := userrules.New(userrules.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := v.Validate([]byte(clientRulesText))
+	r, err := v.Validate([]byte(text))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +141,7 @@ var cases = []renderCase{
 		d.IPs = []netip.Addr{e.dedicated6, e.dedicated4}
 		d.TLS = e.tls("shop.example.org")
 		d.Admin = adminRules
-		d.Client = clientRules(t)
+		d.Client = clientSimpleRules(t)
 		return e.baseServer(), d
 	}},
 	{"hybrid-plain", func(_ testing.TB, e *env) (Server, Domain) {
@@ -133,7 +153,7 @@ var cases = []renderCase{
 		d := e.domain("example.net", model.ModeHybrid)
 		d.Aliases = []model.Domain{"www.example.net"}
 		d.TLS = e.tls("example.net")
-		d.Client = clientRules(t)
+		d.Client = clientSimpleRules(t)
 		return s, d
 	}},
 	{"hybrid-dedicated-admin", func(_ testing.TB, e *env) (Server, Domain) {

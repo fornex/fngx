@@ -445,3 +445,69 @@ func TestFormatArg(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckNoLocation covers the check for domains outside nginx mode (T-8,
+// customer decision 26).
+func TestCheckNoLocation(t *testing.T) {
+	v := mustNew(t, Config{ExtraDirectives: []string{"charset"}})
+	tests := []struct {
+		name     string
+		src      string
+		ok       bool
+		line, co int
+	}{
+		{"empty", "", true, 0, 0},
+		{"comment only", "# nothing\n", true, 0, 0},
+		{"simple directives", "add_header X-A b;\nexpires 1h;\nallow 192.0.2.1;\ndeny all;\nrewrite ^/a$ /b last;\nreturn 404;\ncharset utf-8;\n", true, 0, 0},
+		{"top-level location", "location /a/ { expires 1h; }", false, 1, 1},
+		{"location after simple", "expires 1h;\n  location = /x { return 404; }\n", false, 2, 3},
+		{"empty location", "location /a/ {}", false, 1, 1},
+		{"regex location", "location ~* \\.png$ { expires 30d; }", false, 1, 1},
+		{"nested location", "location /a/ {\n    location /a/b/ { deny all; }\n}\n", false, 1, 1},
+		{"first of several", "return 404;\nlocation /a/ { expires 1h; }\nlocation /b/ { expires 1h; }\n", false, 2, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := v.Validate([]byte(tt.src))
+			if err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			err = r.CheckNoLocation()
+			if tt.ok {
+				if err != nil {
+					t.Fatalf("got %v, want nil", err)
+				}
+				return
+			}
+			var ue *Error
+			if !errors.As(err, &ue) {
+				t.Fatalf("got %v (%T), want *Error", err, err)
+			}
+			if ue.Line != tt.line || ue.Column != tt.co {
+				t.Errorf("position %d:%d, want %d:%d", ue.Line, ue.Column, tt.line, tt.co)
+			}
+			if !strings.Contains(ue.Reason, "location blocks are available only in nginx mode") {
+				t.Errorf("reason %q", ue.Reason)
+			}
+		})
+	}
+}
+
+// TestCheckNoLocationBuilt covers rules built without Validate: a nil
+// receiver and a location below a non-location block.
+func TestCheckNoLocationBuilt(t *testing.T) {
+	var nilRules *Rules
+	if err := nilRules.CheckNoLocation(); err != nil {
+		t.Errorf("nil rules: %v", err)
+	}
+	r := &Rules{Directives: []*Directive{
+		{Name: "expires", Args: []string{"1h"}, Line: 1, Column: 1},
+		{Name: "other", Block: true, Line: 2, Column: 1, Children: []*Directive{
+			{Name: "location", Args: []string{"/x"}, Block: true, Line: 3, Column: 5},
+		}},
+	}}
+	var ue *Error
+	if err := r.CheckNoLocation(); !errors.As(err, &ue) || ue.Line != 3 || ue.Column != 5 {
+		t.Errorf("nested in other block: got %v", err)
+	}
+}
